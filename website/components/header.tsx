@@ -1,7 +1,7 @@
 "use client"
 
 import { signOut, useSession } from "next-auth/react"
-import { Moon, Sun, LogOut, User, Users, Search, Tag } from "lucide-react"
+import { Moon, Sun, LogOut, User, Users, Search, Tag, Upload } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
@@ -44,6 +44,12 @@ export function Header() {
               <Button variant="ghost" size="sm">
                 <Tag className="h-4 w-4 mr-2" />
                 Label
+              </Button>
+            </Link>
+            <Link href="/upload">
+              <Button variant="ghost" size="sm">
+                <Upload className="h-4 w-4 mr-2" />
+                Upload
               </Button>
             </Link>
           </nav>
