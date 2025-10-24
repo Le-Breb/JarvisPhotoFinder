@@ -8,6 +8,7 @@ import clip
 import faiss
 import numpy as np
 import json
+import graph_utils
 
 app = Flask(__name__)
 CORS(app)
@@ -413,6 +414,72 @@ def index_status():
             'face_index': face_embeddings_exist and face_filenames_exist
         })
     except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    
+@app.route('/api/people/graph', methods=['GET'])
+def get_social_graph():
+    """
+    Get social graph data showing people connections based on photo co-occurrence
+    
+    Returns JSON with:
+    - nodes: Array of people with their stats
+    - links: Array of connections between people
+    - stats: Overall graph statistics
+    """
+    try:
+        clusters_path = 'faces/clusters.json'
+        print("📊 Generating social graph...")
+        graph_data = graph_utils.generate_social_graph(clusters_path)
+        return jsonify(graph_data), 200
+    except Exception as e:
+        print(f"❌ Error generating social graph: {str(e)}")
+        traceback.print_exc()
+        return jsonify({
+            'error': str(e),
+            'message': 'Failed to generate social graph'
+        }), 500
+
+
+@app.route('/api/people/graph/connections/<person_id>', methods=['GET'])
+def get_person_graph_connections(person_id):
+    """
+    Get all connections for a specific person
+    
+    Args:
+        person_id: ID of the person
+        
+    Returns JSON with array of connections
+    """
+    try:
+        clusters_path = 'faces/clusters.json'
+        connections = graph_utils.get_person_connections(person_id, clusters_path)
+        return jsonify({
+            'person_id': person_id,
+            'connections': connections
+        }), 200
+    except Exception as e:
+        print(f"❌ Error getting person connections: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/people/graph/top-connections', methods=['GET'])
+def get_top_connections():
+    """
+    Get the strongest connections in the graph
+    
+    Query params:
+        limit: Number of top connections (default: 10)
+    """
+    try:
+        limit = int(request.args.get('limit', 10))
+        clusters_path = 'faces/clusters.json'
+        top_connections = graph_utils.get_strongest_connections(top_n=limit, clusters_path=clusters_path)
+        return jsonify({
+            'top_connections': top_connections,
+            'count': len(top_connections)
+        }), 200
+    except Exception as e:
+        print(f"❌ Error getting top connections: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
