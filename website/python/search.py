@@ -3,7 +3,7 @@ import clip
 import faiss
 import numpy as np
 
-def search_images(query, top_k=5, model_name="ViT-B/32", device="cuda" if torch.cuda.is_available() else "cpu"):
+def search_images(query, top_k=5, model_name="ViT-L/14", device="cuda" if torch.cuda.is_available() else "cpu"):
     model, preprocess = clip.load(model_name, device=device)
     index = faiss.read_index("embeddings.faiss")
     filenames = np.load("filenames.npy")
@@ -16,5 +16,17 @@ def search_images(query, top_k=5, model_name="ViT-B/32", device="cuda" if torch.
     query_vec = text_features.cpu().numpy().astype(np.float32)
     scores, indices = index.search(query_vec, top_k)
 
-    results = [(filenames[i], float(scores[0][rank])) for rank, i in enumerate(indices[0])]
+    results = []
+    for rank, i in enumerate(indices[0]):
+        filename = filenames[i]
+        if filename.startswith('images/'):
+            filename = filename[7:] 
+        
+        image_path = f'/api/images/{filename}'
+        results.append({
+            'filepath': image_path,
+            'thumbnail': image_path,
+            'score': float(scores[0][rank])
+        })
+
     return results

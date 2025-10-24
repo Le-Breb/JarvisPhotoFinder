@@ -34,3 +34,7 @@ def build_index(image_folder="images", model_name="ViT-B/32", device="cuda" if t
 
     np.save("filenames.npy", np.array(filenames))
     print(f"✅ Indexed {len(filenames)} images.")
+
+
+if __name__ == "__main__":
+    build_index()

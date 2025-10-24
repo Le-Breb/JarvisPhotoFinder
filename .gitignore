@@ -1,0 +1,162 @@
+# Jarvis Photo Finder - Project .gitignore
+
+# ========================================
+# Dependencies
+# ========================================
+node_modules/
+website/node_modules/
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+.Python
+
+# ========================================
+# Python Virtual Environments
+# ========================================
+venv/
+.venv/
+env/
+ENV/
+website/python/.venv/
+website/python/venv/
+
+# ========================================
+# Python Package Management
+# ========================================
+pip-log.txt
+pip-delete-this-directory.txt
+*.egg-info/
+dist/
+build/
+*.egg
+
+# ========================================
+# Next.js
+# ========================================
+website/.next/
+website/out/
+website/build
+website/dist
+
+# ========================================
+# Production Build Files
+# ========================================
+*.vercel
+.vercel
+
+# ========================================
+# Testing
+# ========================================
+coverage/
+*.cover
+.hypothesis/
+.pytest_cache/
+*.test.tsx.snap
+*.test.ts.snap
+
+# ========================================
+# Environment Variables & Secrets
+# ========================================
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+website/.env
+website/.env.local
+website/.env.*.local
+
+# ========================================
+# Logs
+# ========================================
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+logs/
+*.log
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# ========================================
+# Cache & Temporary Files
+# ========================================
+.cache/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.turbo
+
+# ========================================
+# IDE & Editor Files
+# ========================================
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+
+# ========================================
+# Data Files (Large Files)
+# ========================================
+# Private images directory
+website/private/images/
+private/images/
+
+# Python face data (generated files)
+website/python/faces/*.npy
+website/python/faces/*.faiss
+website/python/faces/*.pkl
+website/python/faces/clusters.json
+
+# Image embeddings and indexes
+website/python/embeddings.faiss
+website/python/filenames.npy
+website/python/image_dates.npy
+
+# Image directories
+website/python/images/
+images/
+
+# ========================================
+# Temporary Python Scripts
+# ========================================
+website/python/temp_*.py
+
+# ========================================
+# OS Generated Files
+# ========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ========================================
+# TypeScript
+# ========================================
+*.tsbuildinfo
+next-env.d.ts
+
+# ========================================
+# Optional: Keep configuration templates
+# ========================================
+# Uncomment these if you want to track example configs
+# !.env.example
+# !.env.template
+
+# ========================================
+# Optional: Model Files (if very large)
+# ========================================
+# Uncomment if you don't want to track large ML models
+# *.pth
+# *.pt
+# *.onnx
+# *.h5
+private/

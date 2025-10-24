@@ -1,0 +1,11 @@
+flask
+flask-cors
+torch
+clip @ git+https://github.com/openai/CLIP.git
+faiss-cpu
+numpy
+Pillow
+opencv-python
+insightface
+tqdm
+scikit-learn
