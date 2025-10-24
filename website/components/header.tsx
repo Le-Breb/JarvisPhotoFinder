@@ -1,7 +1,7 @@
 "use client"
 
 import { signOut, useSession } from "next-auth/react"
-import { Moon, Sun, LogOut, User, Users, Search, Tag, Upload } from "lucide-react"
+import { Moon, Sun, LogOut, User, Users, Search, Tag, Upload, Network } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
@@ -38,6 +38,12 @@ export function Header() {
               <Button variant="ghost" size="sm">
                 <Users className="h-4 w-4 mr-2" />
                 People
+              </Button>
+            </Link>
+            <Link href="/social-graph">
+              <Button variant="ghost" size="sm">
+                <Network className="h-4 w-4 mr-2" />
+                Social Graph
               </Button>
             </Link>
             <Link href="/label">

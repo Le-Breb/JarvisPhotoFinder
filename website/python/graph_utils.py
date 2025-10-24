@@ -9,6 +9,17 @@ from collections import defaultdict
 from pathlib import Path
 import os
 
+# --- NetworkX Import ---
+# Import at the top level and set a flag
+try:
+    import networkx as nx
+    from networkx.algorithms import community
+    NETWORKX_AVAILABLE = True
+except ImportError:
+    NETWORKX_AVAILABLE = False
+    print("⚠️  NetworkX not installed. Layout and community detection will be skipped.")
+    print("   Install with: pip install networkx")
+
 
 def load_face_clusters(clusters_path='faces/clusters.json'):
     """Load face clusters and metadata"""
@@ -28,57 +39,43 @@ def load_face_clusters(clusters_path='faces/clusters.json'):
         return {}
 
 
-def detect_communities(nodes, links):
+def detect_communities(G):
     """
-    Detect communities/clusters in the social graph using Louvain algorithm
+    Detect communities/clusters in a given NetworkX graph using Louvain algorithm
     Returns a dict mapping node_id to community_id
     """
+    if not NETWORKX_AVAILABLE:
+        return {}
+        
     try:
-        import networkx as nx
-        from networkx.algorithms import community
-        
-        # Create graph
-        G = nx.Graph()
-        
-        # Add nodes
-        for node in nodes:
-            G.add_node(node['id'])
-        
-        # Add edges with weights
-        for link in links:
-            G.add_edge(link['source'], link['target'], weight=link['weight'])
-        
         # Detect communities using Louvain algorithm
-        communities = community.louvain_communities(G, seed=42, weight='weight')
+        communities_set = community.louvain_communities(G, seed=42, weight='weight')
         
         # Create mapping from node_id to community_id
         node_to_community = {}
-        for community_id, community_nodes in enumerate(communities):
+        for community_id, community_nodes in enumerate(communities_set):
             for node_id in community_nodes:
                 node_to_community[node_id] = community_id
         
-        print(f"🔍 Detected {len(communities)} communities")
-        for i, comm in enumerate(communities):
+        print(f"🔍 Detected {len(communities_set)} communities")
+        for i, comm in enumerate(communities_set):
             print(f"  Community {i}: {len(comm)} people")
         
         return node_to_community
         
-    except ImportError:
-        print("⚠️  NetworkX not installed. Install with: pip install networkx")
-        # Fallback: assign everyone to community 0
-        return {node['id']: 0 for node in nodes}
     except Exception as e:
         print(f"❌ Error detecting communities: {e}")
-        # Fallback: assign everyone to community 0
-        return {node['id']: 0 for node in nodes}
+        # Fallback: return empty map
+        return {}
 
 
 def generate_social_graph(clusters_path='faces/clusters.json'):
     """
     Generate social graph data from face clusters with community detection
+    AND pre-computed physics layout.
     
     Returns:
-        dict: Graph data with nodes, links, communities, and statistics
+        dict: Graph data with nodes (inc. x, y coords), links, communities, and stats
     """
     face_data = load_face_clusters(clusters_path)
     
@@ -106,17 +103,12 @@ def generate_social_graph(clusters_path='faces/clusters.json'):
         faces = person_data.get('faces', [])
         
         for face in faces:
-            # Handle different possible keys for image path
             photo_path = face.get('image') or face.get('filepath') or face.get('filename')
             if not photo_path:
                 continue
-                
             photo_to_people[photo_path].add(person_id)
-            
-            # Track photos for this person (deduplicate)
             if photo_path not in people_photos[person_id]:
                 people_photos[person_id].append(photo_path)
-            
             people_faces[person_id].append(face)
     
     print(f"📸 Found {len(photo_to_people)} unique photos with people")
@@ -126,7 +118,6 @@ def generate_social_graph(clusters_path='faces/clusters.json'):
     
     for photo, people in photo_to_people.items():
         people_list = list(people)
-        # For each pair of people in the same photo
         for i, person1 in enumerate(people_list):
             for person2 in people_list[i+1:]:
                 co_occurrence[person1][person2] += 1
@@ -139,7 +130,6 @@ def generate_social_graph(clusters_path='faces/clusters.json'):
         if not faces:
             continue
         
-        # Get representative face
         representative_face = None
         if faces:
             first_face = faces[0]
@@ -165,7 +155,6 @@ def generate_social_graph(clusters_path='faces/clusters.json'):
     
     for person1, connections in co_occurrence.items():
         for person2, weight in connections.items():
-            # Avoid duplicate edges
             edge_key = tuple(sorted([person1, person2]))
             if edge_key not in edge_set and weight > 0:
                 edge_set.add(edge_key)
@@ -178,16 +167,54 @@ def generate_social_graph(clusters_path='faces/clusters.json'):
     
     print(f"🔗 Created {len(links)} connections")
     
-    # Detect communities
-    node_to_community = detect_communities(nodes, links)
+    # --- NetworkX Graph Creation, Community Detection & Layout ---
+    node_to_community = {}
+    pos = {}
+    num_communities = 1 # Default
     
-    # Add community info to nodes
+    if NETWORKX_AVAILABLE:
+        # Create graph
+        G = nx.Graph()
+        for node in nodes:
+            G.add_node(node['id'])
+        for link in links:
+            G.add_edge(link['source'], link['target'], weight=link['weight'])
+        
+        # 1. Detect communities
+        node_to_community = detect_communities(G)
+        num_communities = len(set(node_to_community.values()))
+        if num_communities == 0: num_communities = 1
+        
+        # 2. Pre-compute layout
+        print("Starting layout simulation... (This may take a moment)")
+        # k controls spacing, iterations for stability. Tune k as needed.
+        pos = nx.spring_layout(G, k=0.8, iterations=75, weight='weight', seed=42)
+        print("✅ Layout simulation finished.")
+    
+    else:
+        # Fallback if networkx is not installed
+        node_to_community = {node['id']: 0 for node in nodes}
+    
+    # --- Add community and position data to nodes ---
+    # These dimensions match your React component's viewBox
+    WIDTH = 2200
+    HEIGHT = 1400
+    
     for node in nodes:
-        node['community'] = node_to_community.get(node['id'], 0)
+        node_id = node['id']
+        node['community'] = node_to_community.get(node_id, 0)
+        
+        if node_id in pos:
+            # Scale positions from [0, 1] to [0, WIDTH/HEIGHT]
+            node['x'] = pos[node_id][0] * WIDTH
+            node['y'] = pos[node_id][1] * HEIGHT
+        else:
+            # Fallback for nodes (e.g., if networkx failed or node had no pos)
+            # Give it a random position so it doesn't stack at [0,0]
+            node['x'] = np.random.rand() * WIDTH
+            node['y'] = np.random.rand() * HEIGHT
     
-    # Calculate statistics
-    num_communities = len(set(node_to_community.values()))
-    
+    # --- Calculate statistics ---
     stats = {
         'total_people': len(nodes),
         'total_connections': len(links),
@@ -205,18 +232,14 @@ def generate_social_graph(clusters_path='faces/clusters.json'):
     }
 
 
-def get_person_connections(person_id, clusters_path='faces/clusters.json'):
+def get_person_connections(person_id, clusters_path='faces/clusters.json', graph_data=None):
     """
     Get all connections (co-occurrences) for a specific person
-    
-    Args:
-        person_id: ID of the person
-        clusters_path: Path to clusters JSON file
-        
-    Returns:
-        list: List of connections with weight
     """
-    graph = generate_social_graph(clusters_path)
+    if graph_data:
+        graph = graph_data
+    else:
+        graph = generate_social_graph(clusters_path)
     
     connections = []
     for link in graph['links']:
@@ -231,32 +254,22 @@ def get_person_connections(person_id, clusters_path='faces/clusters.json'):
                 'weight': link['weight']
             })
     
-    # Sort by weight (most connections first)
     connections.sort(key=lambda x: x['weight'], reverse=True)
-    
     return connections
 
 
-def get_strongest_connections(top_n=10, clusters_path='faces/clusters.json'):
+def get_strongest_connections(top_n=10, clusters_path='faces/clusters.json', graph_data=None):
     """
     Get the strongest connections in the social graph
-    
-    Args:
-        top_n: Number of top connections to return
-        clusters_path: Path to clusters JSON file
-        
-    Returns:
-        list: Top N strongest connections
     """
-    graph = generate_social_graph(clusters_path)
+    if graph_data:
+        graph = graph_data
+    else:
+        graph = generate_social_graph(clusters_path)
     
-    # Sort links by weight
     sorted_links = sorted(graph['links'], key=lambda x: x['weight'], reverse=True)
-    
-    # Get person names
     person_names = {node['id']: node['name'] for node in graph['nodes']}
     
-    # Format results
     top_connections = []
     for link in sorted_links[:top_n]:
         top_connections.append({
@@ -271,8 +284,8 @@ def get_strongest_connections(top_n=10, clusters_path='faces/clusters.json'):
 
 
 if __name__ == '__main__':
-    # Test the graph generation
     print("🧪 Testing social graph generation...")
+    # Generate graph ONCE
     graph = generate_social_graph()
     
     print(f"\n📊 Graph Statistics:")
@@ -283,6 +296,7 @@ if __name__ == '__main__':
     
     if graph['stats']['total_connections'] > 0:
         print(f"\n🔗 Top 5 Strongest Connections:")
-        top = get_strongest_connections(top_n=5)
+        # Pass the already-computed graph to avoid re-computing
+        top = get_strongest_connections(top_n=5, graph_data=graph)
         for i, conn in enumerate(top, 1):
             print(f"  {i}. {conn['person1_name']} ↔ {conn['person2_name']}: {conn['shared_photos']} photos")

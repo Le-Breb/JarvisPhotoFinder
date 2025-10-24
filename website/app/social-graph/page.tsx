@@ -1,39 +1,48 @@
-'use client';
+"use client";
 
-import { useEffect, useState, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import * as d3 from 'd3';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog';
 import { Slider } from '@/components/ui/slider';
-import { ZoomIn, ZoomOut, Maximize2, Filter, Maximize, Minimize } from 'lucide-react';
-import * as d3 from 'd3';
+import { Header } from '@/components/header';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog';
+import {
+  ZoomIn,
+  ZoomOut,
+  Maximize,
+  Minimize,
+  Maximize2,
+  Filter,
+} from 'lucide-react'; // Assuming icon imports
 
-interface Node {
+// --- (Mock types - replace with your actual types) ---
+interface GraphNode {
   id: string;
   name: string;
   photo_count: number;
-  representative_face: string;
   total_faces: number;
   community: number;
-  x?: number;
-  y?: number;
-  vx?: number;
-  vy?: number;
-  fx?: number | null;
-  fy?: number | null;
+  x: number; // <-- Now provided by the API
+  y: number; // <-- Now provided by the API
+  representative_face?: string; // <-- Representative face image path
 }
 
-interface Link {
-  source: string | Node;
-  target: string | Node;
+interface GraphLink {
+  source: string | GraphNode;
+  target: string | GraphNode;
   weight: number;
-  value: number;
 }
 
 interface GraphData {
-  nodes: Node[];
-  links: Link[];
-  communities: Record<string, number>;
+  nodes: GraphNode[];
+  links: GraphLink[];
   stats: {
     total_people: number;
     total_connections: number;
@@ -45,51 +54,138 @@ interface GraphData {
 interface PersonFace {
   filename: string;
   bbox: number[];
-  face_id?: string;
 }
 
 const PYTHON_API_URL = process.env.NEXT_PUBLIC_PYTHON_API_URL || 'http://localhost:5000';
-
 const COMMUNITY_COLORS = [
-  'hsl(221.2, 83.2%, 53.3%)', 'hsl(142, 76%, 36%)', 'hsl(262, 83%, 58%)',
-  'hsl(24, 95%, 53%)', 'hsl(346, 77%, 50%)', 'hsl(199, 89%, 48%)',
-  'hsl(48, 96%, 53%)', 'hsl(280, 65%, 60%)', 'hsl(168, 76%, 42%)',
-  'hsl(32, 95%, 44%)',
+  '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+  '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
 ];
+// --- (End of mock types) ---
 
 export default function SocialGraphPage() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [personFaces, setPersonFaces] = useState<PersonFace[]>([]);
   const [loadingPhotos, setLoadingPhotos] = useState(false);
   const [showPhotoDialog, setShowPhotoDialog] = useState(false);
-  const [linkThreshold, setLinkThreshold] = useState(1);
+  const [linkThreshold, setLinkThreshold] = useState(3);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [simulationProgress, setSimulationProgress] = useState(0);
+  // const [simulationProgress, setSimulationProgress] = useState(0); // <-- REMOVED
+
   const svgRef = useRef<SVGSVGElement>(null);
   const zoomRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  // const simulationRef = useRef<any>(null); // <-- REMOVED
+  const nodesRef = useRef<any>(null);
+  const linksGroupRef = useRef<any>(null);
+  const fetchPersonPhotosRef = useRef<(personId: string) => Promise<void>>();
 
-  useEffect(() => {
-    fetch(`${PYTHON_API_URL}/api/people/graph`)
-      .then(res => {
-        if (!res.ok) throw new Error('Failed to fetch graph data');
-        return res.json();
-      })
-      .then(data => {
-        setGraphData(data);
-        setLoading(false);
-      })
-      .catch(error => {
-        console.error('Error loading graph:', error);
-        setError(error.message);
-        setLoading(false);
-      });
+  // ===== TOUS LES USEMEMO/USECALLBACK EN HAUT, AVANT LES EARLY RETURNS =====
+
+  const getCommunityColor = useCallback((community: number) => {
+    return COMMUNITY_COLORS[community % COMMUNITY_COLORS.length];
   }, []);
 
-  const fetchPersonPhotos = async (personId: string) => {
+  const filteredLinks = useMemo(() => {
+    if (!graphData) return [];
+    return graphData.links.filter(link => link.weight >= linkThreshold);
+  }, [graphData, linkThreshold]);
+
+  const getUniquePhotos = useMemo(() => {
+    const photoMap = new Map<string, PersonFace[]>();
+    
+    personFaces.forEach(face => {
+      if (!face.filename) return;
+      
+      const filename = face.filename.replace('images/', '');
+      
+      if (!photoMap.has(filename)) {
+        photoMap.set(filename, []);
+      }
+      photoMap.get(filename)!.push(face);
+    });
+    
+    return Array.from(photoMap.entries());
+  }, [personFaces]);
+
+  const selectedNode = useMemo(() => {
+    if (!selectedNodeId || !graphData) return null;
+    return graphData.nodes.find(n => n.id === selectedNodeId) || null;
+  }, [selectedNodeId, graphData]);
+
+  const communitySizes = useMemo(() => {
+    if (!graphData) return {};
+    return graphData.nodes.reduce((acc, node) => {
+      acc[node.community] = (acc[node.community] || 0) + 1;
+      return acc;
+    }, {} as Record<number, number>);
+  }, [graphData]);
+
+  const maxLinkWeight = useMemo(() => {
+    if (!graphData || graphData.links.length === 0) return 1;
+    return Math.max(...graphData.links.map(l => l.weight));
+  }, [graphData]);
+
+  const handleZoomIn = useCallback(() => {
+    if (svgRef.current && zoomRef.current) {
+      d3.select(svgRef.current)
+        .transition()
+        .duration(300)
+        .call(zoomRef.current.scaleBy, 1.5);
+    }
+  }, []);
+
+  const handleZoomOut = useCallback(() => {
+    if (svgRef.current && zoomRef.current) {
+      d3.select(svgRef.current)
+        .transition()
+        .duration(300)
+        .call(zoomRef.current.scaleBy, 0.67);
+    }
+  }, []);
+
+  const handleResetZoom = useCallback(() => {
+    if (svgRef.current && zoomRef.current) {
+      d3.select(svgRef.current)
+        .transition()
+        .duration(500)
+        .call(zoomRef.current.transform, d3.zoomIdentity);
+    }
+  }, []);
+
+  const handleThresholdChange = useMemo(
+    () => {
+      let timeoutId: NodeJS.Timeout;
+      return (values: number[]) => {
+        clearTimeout(timeoutId);
+        timeoutId = setTimeout(() => {
+          setLinkThreshold(values[0]);
+        }, 150);
+      };
+    },
+    []
+  );
+
+  const toggleFullscreen = useCallback(() => {
+    if (!containerRef.current) return;
+
+    if (!document.fullscreenElement) {
+      containerRef.current.requestFullscreen().then(() => {
+        setIsFullscreen(true);
+      }).catch(err => {
+        console.error('Error attempting to enable fullscreen:', err);
+      });
+    } else {
+      document.exitFullscreen().then(() => {
+        setIsFullscreen(false);
+      });
+    }
+  }, []);
+
+  const fetchPersonPhotos = useCallback(async (personId: string) => {
     setLoadingPhotos(true);
     
     try {
@@ -111,52 +207,59 @@ export default function SocialGraphPage() {
     } finally {
       setLoadingPhotos(false);
     }
-  };
+  }, []);
+  
+  // Store the latest fetchPersonPhotos in ref
+  useEffect(() => {
+    fetchPersonPhotosRef.current = fetchPersonPhotos;
+  }, [fetchPersonPhotos]);
 
-  const getUniquePhotos = () => {
-    const photoMap = new Map<string, PersonFace[]>();
-    
-    personFaces.forEach(face => {
-      if (!face.filename) return;
-      
-      const filename = face.filename.replace('images/', '');
-      
-      if (!photoMap.has(filename)) {
-        photoMap.set(filename, []);
-      }
-      photoMap.get(filename)!.push(face);
-    });
-    
-    return Array.from(photoMap.entries());
-  };
+  // ===== MAINTENANT LES USEEFFECT =====
 
-  const getCommunityColor = (community: number) => {
-    return COMMUNITY_COLORS[community % COMMUNITY_COLORS.length];
-  };
-
-  const filteredLinks = useMemo(() => {
-    if (!graphData) return [];
-    return graphData.links.filter(link => link.weight >= linkThreshold);
-  }, [graphData, linkThreshold]);
-
-  // Toggle fullscreen
-  const toggleFullscreen = () => {
-    if (!containerRef.current) return;
-
-    if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen().then(() => {
-        setIsFullscreen(true);
-      }).catch(err => {
-        console.error('Error attempting to enable fullscreen:', err);
+  useEffect(() => {
+    fetch(`${PYTHON_API_URL}/api/people/graph`)
+      .then(res => {
+        if (!res.ok) throw new Error('Failed to fetch graph data');
+        return res.json();
+      })
+      .then(data => {
+        setGraphData(data);
+        setLoading(false);
+      })
+      .catch(error => {
+        console.error('Error loading graph:', error);
+        setError(error.message);
+        setLoading(false);
       });
-    } else {
-      document.exitFullscreen().then(() => {
-        setIsFullscreen(false);
-      });
-    }
-  };
+  }, []);
 
-  // Listen for fullscreen changes
+  // This effect updates selection highlights and remains unchanged
+  useEffect(() => {
+    if (!nodesRef.current || !selectedNodeId) return;
+
+    const nodes = nodesRef.current;
+    
+    nodes.select('.main-circle')
+      .transition()
+      .duration(300)
+      .attr('fill', (n: any) => n.id === selectedNodeId 
+        ? 'url(#selected-gradient)' 
+        : `url(#gradient-${n.community})`)
+      .attr('r', (n: any) => Math.sqrt(n.photo_count) * 0.5 + (n.id === selectedNodeId ? 7 : 4));
+    
+    nodes.select('.glow')
+      .transition()
+      .duration(300)
+      .attr('fill', (n: any) => {
+        if (n.id === selectedNodeId) return 'hsla(221.2, 83.2%, 53.3%, 0.25)';
+        const color = getCommunityColor(n.community);
+        return d3.color(color)!.copy({opacity: 0.12}).toString();
+      })
+      .attr('r', (n: any) => Math.sqrt(n.photo_count) * 0.5 + (n.id === selectedNodeId ? 12 : 6));
+
+  }, [selectedNodeId, getCommunityColor]);
+
+  // This effect handles fullscreen changes and remains unchanged
   useEffect(() => {
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement);
@@ -168,10 +271,10 @@ export default function SocialGraphPage() {
     };
   }, []);
 
+  // ===== SIMPLIFIED MAIN D3 EFFECT =====
   useEffect(() => {
     if (!svgRef.current || !graphData || graphData.nodes.length === 0) return;
 
-    // Larger canvas - especially in fullscreen
     const width = isFullscreen ? window.innerWidth : 2200;
     const height = isFullscreen ? window.innerHeight : 1400;
 
@@ -184,97 +287,62 @@ export default function SocialGraphPage() {
 
     const defs = svg.append('defs');
     
+    // --- Definitions (Gradients, Filters) ---
+    // This code remains the same
     Array.from(new Set(graphData.nodes.map(n => n.community))).forEach(communityId => {
       const color = getCommunityColor(communityId);
-      
-      const gradient = defs.append('radialGradient')
-        .attr('id', `gradient-${communityId}`);
-      gradient.append('stop')
-        .attr('offset', '0%')
-        .attr('stop-color', d3.color(color)!.brighter(0.8).toString());
-      gradient.append('stop')
-        .attr('offset', '100%')
-        .attr('stop-color', color);
+      const gradient = defs.append('radialGradient').attr('id', `gradient-${communityId}`);
+      gradient.append('stop').attr('offset', '0%').attr('stop-color', d3.color(color)!.brighter(0.8).toString());
+      gradient.append('stop').attr('offset', '100%').attr('stop-color', color);
     });
-
-    const selectedGradient = defs.append('radialGradient')
-      .attr('id', 'selected-gradient');
-    selectedGradient.append('stop')
-      .attr('offset', '0%')
-      .attr('stop-color', 'hsl(221.2, 83.2%, 73.3%)');
-    selectedGradient.append('stop')
-      .attr('offset', '100%')
-      .attr('stop-color', 'hsl(221.2, 83.2%, 53.3%)');
-
-    const filter = defs.append('filter')
-      .attr('id', 'drop-shadow')
-      .attr('height', '130%');
-    filter.append('feGaussianBlur')
-      .attr('in', 'SourceAlpha')
-      .attr('stdDeviation', 2);
-    filter.append('feOffset')
-      .attr('dx', 1)
-      .attr('dy', 1)
-      .attr('result', 'offsetblur');
+    const selectedGradient = defs.append('radialGradient').attr('id', 'selected-gradient');
+    selectedGradient.append('stop').attr('offset', '0%').attr('stop-color', 'hsl(221.2, 83.2%, 73.3%)');
+    selectedGradient.append('stop').attr('offset', '100%').attr('stop-color', 'hsl(221.2, 83.2%, 53.3%)');
+    const filter = defs.append('filter').attr('id', 'drop-shadow').attr('height', '130%');
+    filter.append('feGaussianBlur').attr('in', 'SourceAlpha').attr('stdDeviation', 2);
+    filter.append('feOffset').attr('dx', 1).attr('dy', 1).attr('result', 'offsetblur');
     const feMerge = filter.append('feMerge');
     feMerge.append('feMergeNode');
-    feMerge.append('feMergeNode')
-      .attr('in', 'SourceGraphic');
+    feMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+    // --- End Definitions ---
 
     const container = svg.append('g');
 
+    // --- Zoom ---
+    // This code remains the same
     const zoom = d3.zoom()
       .scaleExtent([0.1, 4])
       .on('zoom', (event) => {
         container.attr('transform', event.transform);
       });
-
     svg.call(zoom as any);
     zoomRef.current = zoom;
 
-    // Prepare nodes and links
-    const nodes = graphData.nodes.map(d => ({ ...d }));
-    const links = filteredLinks.map(d => ({ ...d }));
+    // --- Data Preparation ---
+    const nodes = graphData.nodes; // Nodes already have x, y
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
 
-    const maxWeight = Math.max(...links.map(l => l.weight), 1);
-
-    // Create force simulation with MUCH stronger repulsion
-    const simulation = d3.forceSimulation(nodes as any)
-      .force('link', d3.forceLink(links)
-        .id((d: any) => d.id)
-        .distance(d => {
-          const weight = (d as any).weight;
-          const normalized = weight / maxWeight;
-          // Much longer distances
-          return 250 * (1 - normalized * 0.5);
-        })
-        .strength(d => {
-          const weight = (d as any).weight;
-          const normalized = weight / maxWeight;
-          return 0.2 + normalized * 0.4;
-        })
-      )
-      .force('charge', d3.forceManyBody()
-        .strength(-1200) // Much stronger repulsion
-        .distanceMax(600)
-      )
-      .force('center', d3.forceCenter(width / 2, height / 2))
-      .force('collision', d3.forceCollide()
-        .radius(d => Math.sqrt((d as any).photo_count) * 0.5 + 40) // Larger collision radius
-      )
-      // Community clustering
-      .force('x', d3.forceX(width / 2).strength(0.02))
-      .force('y', d3.forceY(height / 2).strength(0.02))
-      .alphaDecay(0.005) // Slower decay for better settling
-      .velocityDecay(0.4); // More friction
-
-    // Draw community backgrounds
-    const communities = d3.group(nodes, d => d.community);
+    // "Hydrate" links with full node objects for d3
+    const hydratedLinks = filteredLinks.map(link => ({
+      ...link,
+      source: nodeMap.get(typeof link.source === 'string' ? link.source : (link.source as any).id) as GraphNode,
+      target: nodeMap.get(typeof link.target === 'string' ? link.target : (link.target as any).id) as GraphNode
+    })).filter(l => l.source && l.target); // Filter out any broken links
     
-    const hullGroup = container.append('g')
-      .attr('class', 'hulls');
+    const maxWeight = Math.max(...hydratedLinks.map(l => l.weight), 1);
 
-    const hulls = hullGroup.selectAll('path')
+    // ===== ALL D3 SIMULATION CODE IS REMOVED =====
+    // const simulation = d3.forceSimulation(...)
+    // simulation.on('tick', ...)
+    // simulation.on('end', ...)
+    // =============================================
+
+    // --- Hulls ---
+    // This logic was in the tick handler, now it runs once
+    const communities = d3.group(nodes, d => d.community);
+    const hullGroup = container.append('g').attr('class', 'hulls');
+
+    hullGroup.selectAll('path')
       .data(Array.from(communities.entries()))
       .join('path')
       .attr('fill', ([communityId]) => {
@@ -284,56 +352,88 @@ export default function SocialGraphPage() {
       .attr('stroke', ([communityId]) => getCommunityColor(communityId as number))
       .attr('stroke-width', 2)
       .attr('stroke-dasharray', '8,4')
-      .attr('stroke-opacity', 0.3);
+      .attr('stroke-opacity', 0.3)
+      .attr('d', ([communityId, communityNodes]) => {
+        if (communityNodes.length < 3) return null;
+        // This works because n.x and n.y are already defined
+        const points = communityNodes.map(n => [n.x!, n.y!] as [number, number]);
+        const hull = d3.polygonHull(points);
+        if (!hull || hull.length < 3) return null;
+        const centroid = d3.polygonCentroid(hull);
+        const expansion = 70;
+        const expanded = hull.map(point => {
+          const dx = point[0] - centroid[0];
+          const dy = point[1] - centroid[1];
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          if (distance === 0) return point;
+          return [
+            point[0] + (dx / distance) * expansion,
+            point[1] + (dy / distance) * expansion
+          ];
+        });
+        return `M${expanded.map(p => p.join(',')).join('L')}Z`;
+      });
 
-    // Draw links
-    const linkGroup = container.append('g')
-      .attr('class', 'links');
+    // --- Links ---
+    const linkGroup = container.append('g').attr('class', 'links');
+    linksGroupRef.current = linkGroup;
 
-    const intraCommunityLinks = links.filter(l => {
-      const sourceNode = nodes.find(n => n.id === (typeof l.source === 'string' ? l.source : (l.source as any).id));
-      const targetNode = nodes.find(n => n.id === (typeof l.target === 'string' ? l.target : (l.target as any).id));
-      return sourceNode && targetNode && sourceNode.community === targetNode.community;
-    });
-    
-    const interCommunityLinks = links.filter(l => {
-      const sourceNode = nodes.find(n => n.id === (typeof l.source === 'string' ? l.source : (l.source as any).id));
-      const targetNode = nodes.find(n => n.id === (typeof l.target === 'string' ? l.target : (l.target as any).id));
-      return sourceNode && targetNode && sourceNode.community !== targetNode.community;
-    });
+    const intraCommunityLinks = hydratedLinks.filter(l => l.source.community === l.target.community);
+    const interCommunityLinks = hydratedLinks.filter(l => l.source.community !== l.target.community);
 
-    const interLinks = linkGroup.selectAll('line.inter')
+    linkGroup.selectAll('line.inter')
       .data(interCommunityLinks)
       .join('line')
       .attr('class', 'inter')
       .attr('stroke', 'hsl(215.4, 16.3%, 46.9%)')
       .attr('stroke-opacity', d => 0.08 + (d.weight / maxWeight) * 0.12)
       .attr('stroke-width', d => 0.5 + Math.sqrt(d.weight) * 0.4)
-      .attr('stroke-linecap', 'round');
+      .attr('stroke-linecap', 'round')
+      .attr('x1', (d: any) => d.source.x) // <-- Set position directly
+      .attr('y1', (d: any) => d.source.y) // <-- Set position directly
+      .attr('x2', (d: any) => d.target.x) // <-- Set position directly
+      .attr('y2', (d: any) => d.target.y); // <-- Set position directly
 
-    const intraLinks = linkGroup.selectAll('line.intra')
+    linkGroup.selectAll('line.intra')
       .data(intraCommunityLinks)
       .join('line')
       .attr('class', 'intra')
+      .attr('stroke', (d: any) => getCommunityColor(d.source.community)) // <-- Set color directly
       .attr('stroke-opacity', d => 0.15 + (d.weight / maxWeight) * 0.25)
       .attr('stroke-width', d => 0.8 + Math.sqrt(d.weight) * 0.6)
-      .attr('stroke-linecap', 'round');
+      .attr('stroke-linecap', 'round')
+      .attr('x1', (d: any) => d.source.x) // <-- Set position directly
+      .attr('y1', (d: any) => d.source.y) // <-- Set position directly
+      .attr('x2', (d: any) => d.target.x) // <-- Set position directly
+      .attr('y2', (d: any) => d.target.y); // <-- Set position directly
 
-    // Draw nodes - EVEN SMALLER
-    const nodeGroup = container.append('g')
-      .attr('class', 'nodes');
+    // --- Nodes ---
+    
+    // Add clipPath definitions for circular face images
+    nodes.forEach(node => {
+      defs.append('clipPath')
+        .attr('id', `clip-${node.id}`)
+        .append('circle')
+        .attr('r', Math.sqrt(node.photo_count) * 0.5 + 4);
+    });
+    
+    const nodeGroup = container.append('g').attr('class', 'nodes');
 
     const node = nodeGroup.selectAll('g')
       .data(nodes)
       .join('g')
       .attr('class', 'node')
-      .style('cursor', 'pointer');
+      .style('cursor', 'pointer')
+      .attr('transform', (d: any) => `translate(${d.x},${d.y})`); // <-- Set position directly
 
+    nodesRef.current = node;
+
+    // All node drawing code (circles, text, rect) remains the same
     node.append('circle')
       .attr('r', d => Math.sqrt(d.photo_count) * 0.5 + 6)
       .attr('fill', d => {
         const color = getCommunityColor(d.community);
-        return d.id === selectedNode?.id 
+        return d.id === selectedNodeId 
           ? 'hsla(221.2, 83.2%, 53.3%, 0.2)' 
           : d3.color(color)!.copy({opacity: 0.12}).toString();
       })
@@ -341,14 +441,27 @@ export default function SocialGraphPage() {
 
     node.append('circle')
       .attr('r', d => Math.sqrt(d.photo_count) * 0.5 + 4)
-      .attr('fill', d => d.id === selectedNode?.id 
+      .attr('fill', d => d.id === selectedNodeId 
         ? 'url(#selected-gradient)' 
         : `url(#gradient-${d.community})`)
       .attr('stroke', 'hsl(0, 0%, 100%)')
       .attr('stroke-width', 1.5)
       .attr('filter', 'url(#drop-shadow)')
       .attr('class', 'main-circle');
-
+    
+    // Add face image inside the circle
+    node.filter(d => !!d.representative_face) // Only add image if representative_face exists
+      .append('image')
+      .attr('href', d => `/api/images/${d.representative_face?.replace('images/', '')}`)
+      .attr('x', d => -(Math.sqrt(d.photo_count) * 0.5 + 4))
+      .attr('y', d => -(Math.sqrt(d.photo_count) * 0.5 + 4))
+      .attr('width', d => (Math.sqrt(d.photo_count) * 0.5 + 4) * 2)
+      .attr('height', d => (Math.sqrt(d.photo_count) * 0.5 + 4) * 2)
+      .attr('clip-path', d => `url(#clip-${d.id})`)
+      .style('opacity', 0.85)
+      .style('pointer-events', 'none');
+    
+    // ... (rest of node.append calls for count, name, etc.) ...
     node.append('circle')
       .attr('r', 8)
       .attr('cx', d => Math.sqrt(d.photo_count) * 0.5 + 2)
@@ -389,90 +502,19 @@ export default function SocialGraphPage() {
     node.append('title')
       .text(d => `${d.name}\nGroupe ${d.community + 1}\n${d.photo_count} photos\n${d.total_faces} visages`);
 
-    // Update link colors based on community
-    function updateLinkColors() {
-      intraLinks.attr('stroke', (d: any) => {
-        const source = d.source as Node;
-        return getCommunityColor(source.community);
-      });
-    }
 
-    // Update positions on tick
-    simulation.on('tick', () => {
-      // Update progress
-      const alpha = simulation.alpha();
-      const progress = Math.max(0, Math.min(100, (1 - alpha) * 100));
-      setSimulationProgress(Math.round(progress));
-
-      // Update link positions
-      interLinks
-        .attr('x1', (d: any) => d.source.x)
-        .attr('y1', (d: any) => d.source.y)
-        .attr('x2', (d: any) => d.target.x)
-        .attr('y2', (d: any) => d.target.y);
-
-      intraLinks
-        .attr('x1', (d: any) => d.source.x)
-        .attr('y1', (d: any) => d.source.y)
-        .attr('x2', (d: any) => d.target.x)
-        .attr('y2', (d: any) => d.target.y);
-
-      // Update node positions
-      node.attr('transform', (d: any) => `translate(${d.x},${d.y})`);
-
-      // Update community hulls
-      hulls.attr('d', ([communityId, communityNodes]) => {
-        if (communityNodes.length < 3) return null;
-        
-        const points = communityNodes.map(n => [n.x!, n.y!] as [number, number]);
-        const hull = d3.polygonHull(points);
-        
-        if (!hull || hull.length < 3) return null;
-        
-        const centroid = d3.polygonCentroid(hull);
-        const expansion = 70;
-        const expanded = hull.map(point => {
-          const dx = point[0] - centroid[0];
-          const dy = point[1] - centroid[1];
-          const distance = Math.sqrt(dx * dx + dy * dy);
-          if (distance === 0) return point;
-          return [
-            point[0] + (dx / distance) * expansion,
-            point[1] + (dy / distance) * expansion
-          ];
-        });
-        
-        return `M${expanded.map(p => p.join(',')).join('L')}Z`;
-      });
-
-      updateLinkColors();
-    });
-
-    // Stop simulation when stabilized
-    simulation.on('end', () => {
-      console.log('✅ Simulation stabilisée');
-      setSimulationProgress(100);
-    });
-
-    // Auto-stop after alpha threshold
-    const checkStabilization = setInterval(() => {
-      if (simulation.alpha() < 0.01) {
-        simulation.stop();
-        clearInterval(checkStabilization);
-      }
-    }, 100);
-
-    // Interactions
+    // --- Event Handlers ---
     node.on('mouseenter', function(event, d) {
       const connectedIds = new Set<string>();
-      links.forEach(link => {
-        const sourceId = (link.source as any).id || link.source;
-        const targetId = (link.target as any).id || link.target;
+      // Use hydratedLinks which have full objects
+      hydratedLinks.forEach(link => {
+        const sourceId = (link.source as GraphNode).id;
+        const targetId = (link.target as GraphNode).id;
         if (sourceId === d.id) connectedIds.add(targetId);
         if (targetId === d.id) connectedIds.add(sourceId);
       });
 
-      node.style('opacity', (n: Node) => 
+      node.style('opacity', (n: GraphNode) => 
         n.id === d.id || connectedIds.has(n.id) ? 1 : 0.2
       );
 
@@ -491,6 +533,7 @@ export default function SocialGraphPage() {
           return null;
         });
 
+      // ... (rest of mouseenter transitions remain the same) ...
       d3.select(this).select('.main-circle')
         .transition()
         .duration(200)
@@ -503,12 +546,13 @@ export default function SocialGraphPage() {
         .attr('fill-opacity', 0.25);
     })
     .on('mouseleave', function(event, d) {
+      // This logic remains the same
       node.style('opacity', 1);
       linkGroup.selectAll('line')
         .style('opacity', null)
         .style('stroke-width', null);
 
-      if (d.id !== selectedNode?.id) {
+      if (d.id !== selectedNodeId) {
         d3.select(this).select('.main-circle')
           .transition()
           .duration(200)
@@ -523,116 +567,80 @@ export default function SocialGraphPage() {
     });
 
     node.on('click', (event, d) => {
+      // This logic remains the same
       event.stopPropagation();
-      setSelectedNode(d);
-      fetchPersonPhotos(d.id);
-      
-      node.select('.main-circle')
-        .transition()
-        .duration(300)
-        .attr('fill', (n: any) => n.id === d.id 
-          ? 'url(#selected-gradient)' 
-          : `url(#gradient-${n.community})`)
-        .attr('r', (n: any) => Math.sqrt(n.photo_count) * 0.5 + (n.id === d.id ? 7 : 4));
-      
-      node.select('.glow')
-        .transition()
-        .duration(300)
-        .attr('fill', (n: any) => {
-          if (n.id === d.id) return 'hsla(221.2, 83.2%, 53.3%, 0.25)';
-          const color = getCommunityColor(n.community);
-          return d3.color(color)!.copy({opacity: 0.12}).toString();
-        })
-        .attr('r', (n: any) => Math.sqrt(n.photo_count) * 0.5 + (n.id === d.id ? 12 : 6));
+      setSelectedNodeId(d.id);
+      fetchPersonPhotosRef.current?.(d.id);
     });
 
-    return () => {
-      simulation.stop();
-      clearInterval(checkStabilization);
-    };
+    // No simulation, so no cleanup function is needed
+    // return () => { ... };
 
-  }, [graphData, selectedNode?.id, filteredLinks, isFullscreen]);
+  }, [graphData, filteredLinks, isFullscreen, getCommunityColor]);
+  // ^ selectedNodeId removed from dependencies to prevent graph re-render on node click
+  // ^ fetchPersonPhotos removed and replaced with ref to prevent graph re-render
+  // Node selection styling is handled by separate useEffect above
 
-  const handleZoomIn = () => {
-    if (svgRef.current && zoomRef.current) {
-      d3.select(svgRef.current)
-        .transition()
-        .duration(300)
-        .call(zoomRef.current.scaleBy, 1.5);
-    }
-  };
-
-  const handleZoomOut = () => {
-    if (svgRef.current && zoomRef.current) {
-      d3.select(svgRef.current)
-        .transition()
-        .duration(300)
-        .call(zoomRef.current.scaleBy, 0.67);
-    }
-  };
-
-  const handleResetZoom = () => {
-    if (svgRef.current && zoomRef.current) {
-      d3.select(svgRef.current)
-        .transition()
-        .duration(500)
-        .call(zoomRef.current.transform, d3.zoomIdentity);
-    }
-  };
+  // ===== MAINTENANT LES EARLY RETURNS =====
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-lg">Chargement du graphe social...</div>
-      </div>
+      <>
+        <Header />
+        <div className="flex items-center justify-center h-screen">
+          <div className="text-lg">Chargement du graphe social...</div>
+        </div>
+      </>
     );
   }
 
   if (error) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        <Card className="p-6 max-w-md">
-          <h2 className="text-xl font-bold text-destructive mb-2">Erreur</h2>
-          <p className="mb-2">{error}</p>
-          <p className="text-sm text-muted-foreground">
-            Assurez-vous que l'API Python tourne sur {PYTHON_API_URL}
-          </p>
-        </Card>
-      </div>
+      <>
+        <Header />
+        <div className="flex items-center justify-center h-screen">
+          <Card className="p-6 max-w-md">
+            <h2 className="text-xl font-bold text-destructive mb-2">Erreur</h2>
+            <p className="mb-2">{error}</p>
+            <p className="text-sm text-muted-foreground">
+              Assurez-vous que l'API Python tourne sur {PYTHON_API_URL}
+            </p>
+          </Card>
+        </div>
+      </>
     );
   }
 
   if (!graphData || graphData.nodes.length === 0) {
     return (
-      <div className="flex items-center justify-center h-screen">
-        <Card className="p-6 max-w-md">
-          <h2 className="text-xl font-bold mb-2">Aucune donnée</h2>
-          <p>Aucune personne trouvée dans votre collection de photos.</p>
-        </Card>
-      </div>
+      <>
+        <Header />
+        <div className="flex items-center justify-center h-screen">
+          <Card className="p-6 max-w-md">
+            <h2 className="text-xl font-bold mb-2">Aucune donnée</h2>
+            <p>Aucune personne trouvée dans votre collection de photos.</p>
+          </Card>
+        </div>
+      </>
     );
   }
 
-  const uniquePhotos = getUniquePhotos();
-
-  const communitySizes = graphData.nodes.reduce((acc, node) => {
-    acc[node.community] = (acc[node.community] || 0) + 1;
-    return acc;
-  }, {} as Record<number, number>);
-
-  const maxLinkWeight = Math.max(...graphData.links.map(l => l.weight));
+  // ===== LE RESTE DU JSX =====
 
   return (
-    <div className="container mx-auto p-6 max-w-[2400px]">
-      {!isFullscreen && (
+    <>
+      <Header />
+      <div className="container mx-auto p-6 max-w-[2400px]">
+        {!isFullscreen && (
         <>
           <div className="mb-6">
             <h1 className="text-3xl font-bold mb-2">Graphe Social</h1>
             <p className="text-muted-foreground">
-              Visualisation des relations sociales détectées automatiquement. 
-              Le graphe se stabilise automatiquement grâce à une simulation physique.
+              Visualisation des relations sociales détectées automatiquement.
+              La position des personnes est pré-calculée par le serveur.
             </p>
             
+            {/* ... (Stat cards remain the same) ... */}
             <div className="flex gap-4 mt-4 flex-wrap">
               <Card className="p-4 bg-card">
                 <div className="text-2xl font-bold text-primary">{graphData.stats.total_people}</div>
@@ -652,6 +660,7 @@ export default function SocialGraphPage() {
               </Card>
             </div>
 
+            {/* ... (Slider card remains the same) ... */}
             <Card className="p-4 mt-4 bg-card">
               <div className="flex items-center gap-4">
                 <Filter className="h-5 w-5 text-muted-foreground" />
@@ -665,8 +674,8 @@ export default function SocialGraphPage() {
                     </span>
                   </div>
                   <Slider
-                    value={[linkThreshold]}
-                    onValueChange={(values) => setLinkThreshold(values[0])}
+                    defaultValue={[linkThreshold]}
+                    onValueChange={handleThresholdChange}
                     min={1}
                     max={Math.max(10, Math.floor(maxLinkWeight / 2))}
                     step={1}
@@ -679,6 +688,7 @@ export default function SocialGraphPage() {
               </div>
             </Card>
 
+            {/* ... (Community legend card remains the same) ... */}
             <Card className="p-4 mt-4 bg-card">
               <h3 className="font-semibold mb-3">Communautés détectées</h3>
               <div className="flex gap-3 flex-wrap">
@@ -707,6 +717,7 @@ export default function SocialGraphPage() {
         className={`p-4 relative bg-card ${isFullscreen ? 'h-screen' : ''}`}
       >
         <div className="absolute top-6 right-6 z-10 flex gap-2">
+          {/* ... (Zoom/Fullscreen buttons remain the same) ... */}
           <Button variant="outline" size="icon" onClick={handleZoomIn} title="Zoom avant">
             <ZoomIn className="h-4 w-4" />
           </Button>
@@ -721,21 +732,8 @@ export default function SocialGraphPage() {
           </Button>
         </div>
 
-        {simulationProgress < 100 && (
-          <div className="absolute top-6 left-6 z-10 bg-card/90 backdrop-blur-sm px-4 py-2 rounded-lg border shadow-lg">
-            <div className="flex items-center gap-3">
-              <div className="text-sm font-medium text-muted-foreground">
-                Stabilisation: {simulationProgress}%
-              </div>
-              <div className="w-32 h-2 bg-secondary rounded-full overflow-hidden">
-                <div 
-                  className="h-full bg-primary transition-all duration-300"
-                  style={{ width: `${simulationProgress}%` }}
-                />
-              </div>
-            </div>
-          </div>
-        )}
+        {/* ===== SIMULATION PROGRESS BAR REMOVED ===== */}
+        {/* {simulationProgress < 100 && ( ... )} */}
         
         <div className={`w-full overflow-auto rounded-lg border bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 ${isFullscreen ? 'h-full' : ''}`}>
           <svg 
@@ -746,6 +744,7 @@ export default function SocialGraphPage() {
         
         {!isFullscreen && (
           <div className="mt-4 text-sm text-muted-foreground">
+            {/* ... (Legend remains the same) ... */}
             <p className="font-medium mb-2">Légende:</p>
             <div className="grid grid-cols-2 gap-2">
               <div className="flex items-center gap-2">
@@ -761,6 +760,7 @@ export default function SocialGraphPage() {
         )}
       </Card>
 
+      {/* ... (Photo Dialog remains the same) ... */}
       <Dialog open={showPhotoDialog} onOpenChange={setShowPhotoDialog}>
         <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
@@ -772,7 +772,7 @@ export default function SocialGraphPage() {
               />
             </DialogTitle>
             <DialogDescription>
-              Groupe {selectedNode ? selectedNode.community + 1 : ''} • {uniquePhotos.length} photo{uniquePhotos.length > 1 ? 's' : ''} • {personFaces.length} visage{personFaces.length > 1 ? 's' : ''}
+              Groupe {selectedNode ? selectedNode.community + 1 : ''} • {getUniquePhotos.length} photo{getUniquePhotos.length > 1 ? 's' : ''} • {personFaces.length} visage{personFaces.length > 1 ? 's' : ''}
             </DialogDescription>
           </DialogHeader>
           
@@ -782,7 +782,7 @@ export default function SocialGraphPage() {
             </div>
           ) : (
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mt-4">
-              {uniquePhotos.map(([filename, faces], index) => (
+              {getUniquePhotos.map(([filename, faces], index) => (
                 <div key={index} className="space-y-2">
                   <div className="relative aspect-square overflow-hidden rounded-lg border-2 border-border hover:border-primary transition-colors group">
                     <img
@@ -823,5 +823,6 @@ export default function SocialGraphPage() {
         </DialogContent>
       </Dialog>
     </div>
+    </>
   );
 }
