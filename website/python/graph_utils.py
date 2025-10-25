@@ -131,6 +131,7 @@ def generate_social_graph(clusters_path='faces/clusters.json'):
             continue
         
         representative_face = None
+        representative_bbox = None
         if faces:
             first_face = faces[0]
             representative_face = (
@@ -138,13 +139,15 @@ def generate_social_graph(clusters_path='faces/clusters.json'):
                 first_face.get('filepath') or 
                 first_face.get('filename')
             )
+            representative_bbox = first_face.get('bbox')
         
         nodes.append({
             'id': person_id,
             'name': person_data.get('name', f'Person {person_id}'),
             'photo_count': len(people_photos[person_id]),
             'total_faces': len(faces),
-            'representative_face': representative_face
+            'representative_face': representative_face,
+            'representative_bbox': representative_bbox
         })
     
     print(f"👥 Created {len(nodes)} people nodes")

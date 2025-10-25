@@ -9,6 +9,7 @@ import faiss
 import numpy as np
 import json
 import graph_utils
+import similarity_graph_utils
 
 app = Flask(__name__)
 CORS(app)
@@ -240,11 +241,10 @@ def combine_search_results(face_results, text_results, threshold=0.01):
     for result in face_results:
         filepath = result['filepath']
         face_score = result['score']  # Negative distance
-        # Convert negative distance to similarity in range [0, 1]: 1 / (1 + distance)
-        # Distance 0 → similarity 1.0
-        # Distance 10 → similarity 0.09
-        # Distance 20 → similarity 0.05
-        face_similarity = np.exp(-abs(face_score))
+        # Convert negative distance to similarity in range (0, 1]: use inverse distance
+        # This maps distance 0 -> 1.0, distance 10 -> ~0.091, distance 20 -> ~0.047
+        # We use 1 / (1 + distance) which is stable for a wide range of distances.
+        face_similarity = 1.0 / (1.0 + abs(face_score))
         # Add threshold, use threshold for missing text score
         combined_score = (face_similarity + threshold) * threshold
         combined[filepath] = {
@@ -254,7 +254,8 @@ def combine_search_results(face_results, text_results, threshold=0.01):
             'text_score': 0,  # No text match yet
             'combined_score': combined_score
         }
-        print(f"📊 Face only: {filepath.split('/')[-1]} | Face dist: {face_score:.3f} → sim: {face_similarity:.3f} | ({face_similarity:.3f} + {threshold:.3f}) × {threshold:.3f} = {combined_score:.3f}")
+        # Print with higher precision so very small similarities are visible
+        print(f"📊 Face only: {filepath.split('/')[-1]} | Face dist: {face_score:.3f} → sim: {face_similarity:.6f} | ({face_similarity:.6f} + {threshold:.6f}) × {threshold:.6f} = {combined_score:.6f}")
     
     # Add or update with text results
     for result in text_results:
@@ -481,6 +482,135 @@ def get_top_connections():
     except Exception as e:
         print(f"❌ Error getting top connections: {str(e)}")
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/people/similarity-graph', methods=['GET'])
+def get_similarity_graph():
+    """
+    Get similarity graph data showing people positioned by facial similarity
+    Uses face embeddings to compute similarity and MDS for positioning
+    
+    Query params:
+        min_similarity: Minimum similarity threshold (0-1, default: 0.5)
+        
+    Returns JSON with:
+    - nodes: Array of people with their stats and positions based on similarity
+    - links: Array of connections between similar people
+    - stats: Overall graph statistics
+    """
+    try:
+        min_similarity = float(request.args.get('min_similarity', 0.5))
+        clusters_path = 'faces/clusters.json'
+        embeddings_path = 'faces/embeddings.npy'
+        
+        print(f"📊 Generating similarity graph (min_similarity={min_similarity})...")
+        graph_data = similarity_graph_utils.generate_similarity_graph(
+            clusters_path=clusters_path,
+            embeddings_path=embeddings_path,
+            min_similarity=min_similarity
+        )
+        return jsonify(graph_data), 200
+    except Exception as e:
+        print(f"❌ Error generating similarity graph: {str(e)}")
+        traceback.print_exc()
+        return jsonify({
+            'error': str(e),
+            'message': 'Failed to generate similarity graph'
+        }), 500
+
+
+@app.route('/api/people/similar-clusters', methods=['GET'])
+def get_similar_clusters():
+    """
+    Find pairs of clusters that are very similar and might need to be merged
+    Uses face embeddings to compute similarity between cluster centroids
+    
+    Query params:
+        min_similarity: Minimum similarity threshold (0-1, default: 0.7)
+        max_pairs: Maximum number of pairs to return (default: 50)
+        
+    Returns JSON with:
+    - pairs: Array of similar cluster pairs with their similarity scores
+    """
+    try:
+        min_similarity = float(request.args.get('min_similarity', 0.7))
+        max_pairs = int(request.args.get('max_pairs', 50))
+        
+        clusters_path = 'faces/clusters.json'
+        embeddings_path = 'faces/embeddings.npy'
+        
+        print(f"🔍 Finding similar clusters (min_similarity={min_similarity}, max_pairs={max_pairs})...")
+        
+        # Compute person embeddings (average embedding per person)
+        person_embeddings = similarity_graph_utils.compute_person_embeddings(clusters_path, embeddings_path)
+        
+        if not person_embeddings:
+            return jsonify({'pairs': []}), 200
+        
+        # Compute similarity matrix
+        similarity_matrix, person_ids = similarity_graph_utils.compute_similarity_matrix(person_embeddings)
+        
+        # Load cluster data for metadata
+        face_data = similarity_graph_utils.load_face_clusters(clusters_path)
+        
+        # Find similar pairs
+        similar_pairs = []
+        for i in range(len(person_ids)):
+            for j in range(i + 1, len(person_ids)):
+                person1 = person_ids[i]
+                person2 = person_ids[j]
+                
+                similarity = similarity_matrix.get((person1, person2), 0)
+                
+                if similarity >= min_similarity:
+                    # Get cluster info
+                    cluster1 = face_data.get(person1, {})
+                    cluster2 = face_data.get(person2, {})
+                    
+                    faces1 = cluster1.get('faces', [])
+                    faces2 = cluster2.get('faces', [])
+                    
+                    if not faces1 or not faces2:
+                        continue
+                    
+                    # Get representative faces
+                    rep1 = faces1[0] if faces1 else None
+                    rep2 = faces2[0] if faces2 else None
+                    
+                    similar_pairs.append({
+                        'cluster1_id': person1,
+                        'cluster1_name': cluster1.get('name', f'Person {person1}'),
+                        'cluster1_face_count': len(faces1),
+                        'cluster1_representative': {
+                            'filename': rep1.get('filename') or rep1.get('image'),
+                            'bbox': rep1.get('bbox')
+                        } if rep1 else None,
+                        'cluster2_id': person2,
+                        'cluster2_name': cluster2.get('name', f'Person {person2}'),
+                        'cluster2_face_count': len(faces2),
+                        'cluster2_representative': {
+                            'filename': rep2.get('filename') or rep2.get('image'),
+                            'bbox': rep2.get('bbox')
+                        } if rep2 else None,
+                        'similarity': float(similarity)
+                    })
+        
+        # Sort by similarity (highest first) and limit
+        similar_pairs.sort(key=lambda x: x['similarity'], reverse=True)
+        similar_pairs = similar_pairs[:max_pairs]
+        
+        print(f"✅ Found {len(similar_pairs)} similar cluster pairs")
+        
+        return jsonify({'pairs': similar_pairs}), 200
+        
+    except Exception as e:
+        print(f"❌ Error finding similar clusters: {str(e)}")
+        traceback.print_exc()
+        return jsonify({
+            'error': str(e),
+            'message': 'Failed to find similar clusters'
+        }), 500
+
 
 if __name__ == '__main__':
     # Load resources into memory at startup

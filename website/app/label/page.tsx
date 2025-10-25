@@ -17,7 +17,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { Tag, CheckCircle, XCircle, Users, AlertTriangle, SkipForward } from "lucide-react"
+import { Tag, CheckCircle, XCircle, Users, AlertTriangle, SkipForward, GitMerge } from "lucide-react"
 import axios from "axios"
 import { FaceImage } from "@/components/face-image"
 
@@ -41,8 +41,26 @@ interface BoundaryFace {
   context_faces?: any[]
 }
 
+interface SimilarPair {
+  cluster1_id: string
+  cluster1_name: string
+  cluster1_face_count: number
+  cluster1_representative: {
+    filename: string
+    bbox: number[]
+  } | null
+  cluster2_id: string
+  cluster2_name: string
+  cluster2_face_count: number
+  cluster2_representative: {
+    filename: string
+    bbox: number[]
+  } | null
+  similarity: number
+}
+
 export default function LabelPage() {
-  const [activeTab, setActiveTab] = useState<"label" | "validate">("label")
+  const [activeTab, setActiveTab] = useState<"label" | "validate" | "merge">("label")
 
   // Label mode state
   const [unlabeledClusters, setUnlabeledClusters] = useState<ClusterData[]>([])
@@ -61,12 +79,21 @@ export default function LabelPage() {
   const [newPersonName, setNewPersonName] = useState("")
   const [searchQuery, setSearchQuery] = useState("")
 
+  // Merge mode state
+  const [similarPairs, setSimilarPairs] = useState<SimilarPair[]>([])
+  const [currentMergeIndex, setCurrentMergeIndex] = useState(0)
+  const [loadingMerge, setLoadingMerge] = useState(true)
+  const [merging, setMerging] = useState(false)
+  const [mergeName, setMergeName] = useState("")
+
   // Load data on mount
   useEffect(() => {
     if (activeTab === "label") {
       loadUnlabeledClusters()
-    } else {
+    } else if (activeTab === "validate") {
       loadBoundaryFaces()
+    } else if (activeTab === "merge") {
+      loadSimilarPairs()
     }
   }, [activeTab])
 
@@ -97,6 +124,19 @@ export default function LabelPage() {
       console.error("Error loading boundary faces:", error)
     } finally {
       setLoadingValidation(false)
+    }
+  }
+
+  const loadSimilarPairs = async () => {
+    setLoadingMerge(true)
+    try {
+      const response = await axios.get("/api/label/similar-clusters?min_similarity=0.7&max_pairs=50")
+      setSimilarPairs(response.data.pairs)
+      setCurrentMergeIndex(0)
+    } catch (error) {
+      console.error("Error loading similar pairs:", error)
+    } finally {
+      setLoadingMerge(false)
     }
   }
 
@@ -183,6 +223,37 @@ export default function LabelPage() {
     } finally {
       setValidating(false)
     }
+  }
+
+  const handleMergeClusters = async () => {
+    if (!mergeName.trim()) return
+
+    setMerging(true)
+    try {
+      const currentPair = similarPairs[currentMergeIndex]
+      
+      await axios.post("/api/people/merge", {
+        clusterIds: [currentPair.cluster1_id, currentPair.cluster2_id],
+        name: mergeName
+      })
+
+      setMergeName("")
+      setCurrentMergeIndex(currentMergeIndex + 1)
+    } catch (error) {
+      console.error("Error merging clusters:", error)
+      alert("Failed to merge clusters")
+    } finally {
+      setMerging(false)
+    }
+  }
+
+  const handleSkipMerge = () => {
+    setMergeName("")
+    setCurrentMergeIndex(currentMergeIndex + 1)
+  }
+
+  const handleKeepSeparate = () => {
+    setCurrentMergeIndex(currentMergeIndex + 1)
   }
 
   // Filter clusters based on search query
@@ -593,6 +664,184 @@ export default function LabelPage() {
     )
   }
 
+  const renderMergeMode = () => {
+    if (loadingMerge) {
+      return (
+        <div className="space-y-4">
+          <Skeleton className="h-64 w-full" />
+          <Skeleton className="h-10 w-full" />
+        </div>
+      )
+    }
+
+    if (similarPairs.length === 0) {
+      return (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="text-center text-muted-foreground">
+              <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
+              <p className="text-lg font-medium mb-2">All done!</p>
+              <p>No similar clusters found that need merging.</p>
+            </div>
+          </CardContent>
+        </Card>
+      )
+    }
+
+    if (currentMergeIndex >= similarPairs.length) {
+      return (
+        <Card>
+          <CardContent className="pt-6">
+            <div className="text-center text-muted-foreground">
+              <CheckCircle className="h-12 w-12 mx-auto mb-4 text-green-500" />
+              <p className="text-lg font-medium mb-2">Merging complete!</p>
+              <p className="mb-4">You&apos;ve processed all similar cluster pairs.</p>
+              <Button onClick={() => setCurrentMergeIndex(0)}>
+                Start Over
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )
+    }
+
+    const currentPair = similarPairs[currentMergeIndex]
+    const progress = ((currentMergeIndex) / similarPairs.length) * 100
+
+    return (
+      <div className="space-y-6">
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Review Pair {currentMergeIndex + 1} of {similarPairs.length}</CardTitle>
+                <CardDescription>
+                  Similarity: <span className="font-mono font-semibold text-primary">{(currentPair.similarity * 100).toFixed(1)}%</span>
+                </CardDescription>
+              </div>
+              <Badge variant="outline">{Math.round(progress)}% Complete</Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <Progress value={progress} />
+
+            {/* Two clusters side by side */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {/* Cluster 1 */}
+              <div className="space-y-3">
+                <div className="text-center">
+                  <h3 className="font-semibold text-lg">{currentPair.cluster1_name}</h3>
+                  <p className="text-sm text-muted-foreground">{currentPair.cluster1_face_count} faces</p>
+                </div>
+                {currentPair.cluster1_representative && (
+                  <div className="flex justify-center">
+                    <FaceImage
+                      filename={currentPair.cluster1_representative.filename}
+                      bbox={currentPair.cluster1_representative.bbox}
+                      alt={currentPair.cluster1_name}
+                      className="w-64 h-64 border-2 border-border rounded-lg bg-muted"
+                      padding={30}
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Cluster 2 */}
+              <div className="space-y-3">
+                <div className="text-center">
+                  <h3 className="font-semibold text-lg">{currentPair.cluster2_name}</h3>
+                  <p className="text-sm text-muted-foreground">{currentPair.cluster2_face_count} faces</p>
+                </div>
+                {currentPair.cluster2_representative && (
+                  <div className="flex justify-center">
+                    <FaceImage
+                      filename={currentPair.cluster2_representative.filename}
+                      bbox={currentPair.cluster2_representative.bbox}
+                      alt={currentPair.cluster2_name}
+                      className="w-64 h-64 border-2 border-border rounded-lg bg-muted"
+                      padding={30}
+                    />
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Question */}
+            <div className="text-center space-y-2">
+              <p className="text-lg font-medium flex items-center justify-center gap-2">
+                <GitMerge className="h-5 w-5 text-primary" />
+                Are these the same person?
+              </p>
+              <p className="text-sm text-muted-foreground">
+                If yes, they will be merged into one cluster
+              </p>
+            </div>
+
+            {/* Merge name input (shown when user wants to merge) */}
+            {mergeName !== null && (
+              <div className="space-y-2">
+                <Label htmlFor="merge-name">Merged Person Name</Label>
+                <Input
+                  id="merge-name"
+                  placeholder={`Enter name (default: ${currentPair.cluster1_name})`}
+                  value={mergeName}
+                  onChange={(e) => setMergeName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      if (!mergeName.trim()) {
+                        setMergeName(currentPair.cluster1_name)
+                      }
+                      handleMergeClusters()
+                    }
+                  }}
+                  disabled={merging}
+                  autoFocus
+                />
+              </div>
+            )}
+
+            {/* Buttons */}
+            <div className="flex gap-3 justify-center flex-wrap">
+              <Button
+                onClick={() => {
+                  if (!mergeName.trim()) {
+                    setMergeName(currentPair.cluster1_name)
+                    setTimeout(handleMergeClusters, 0)
+                  } else {
+                    handleMergeClusters()
+                  }
+                }}
+                disabled={merging}
+                className="min-w-32"
+              >
+                <GitMerge className="mr-2 h-4 w-4" />
+                Yes, Merge
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleKeepSeparate}
+                disabled={merging}
+                className="min-w-32"
+              >
+                <XCircle className="mr-2 h-4 w-4" />
+                No, Keep Separate
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={handleSkipMerge}
+                disabled={merging}
+                className="min-w-32"
+              >
+                <SkipForward className="mr-2 h-4 w-4" />
+                Skip
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="min-h-screen bg-background">
       <Header />
@@ -601,12 +850,12 @@ export default function LabelPage() {
           <div>
             <h1 className="text-3xl font-bold mb-2">Face Labeling</h1>
             <p className="text-muted-foreground">
-              Label unlabeled clusters and validate uncertain face assignments
+              Label unlabeled clusters, validate uncertain faces, and merge similar clusters
             </p>
           </div>
 
-          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "label" | "validate")}>
-            <TabsList className="grid w-full grid-cols-2">
+          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "label" | "validate" | "merge")}>
+            <TabsList className="grid w-full grid-cols-3">
               <TabsTrigger value="label">
                 <Tag className="mr-2 h-4 w-4" />
                 Label Clusters ({unlabeledClusters.length})
@@ -614,6 +863,10 @@ export default function LabelPage() {
               <TabsTrigger value="validate">
                 <AlertTriangle className="mr-2 h-4 w-4" />
                 Validate Faces ({boundaryFaces.length})
+              </TabsTrigger>
+              <TabsTrigger value="merge">
+                <GitMerge className="mr-2 h-4 w-4" />
+                Merge Similar ({similarPairs.length})
               </TabsTrigger>
             </TabsList>
 
@@ -623,6 +876,10 @@ export default function LabelPage() {
 
             <TabsContent value="validate" className="mt-6">
               {renderValidationMode()}
+            </TabsContent>
+
+            <TabsContent value="merge" className="mt-6">
+              {renderMergeMode()}
             </TabsContent>
           </Tabs>
         </div>

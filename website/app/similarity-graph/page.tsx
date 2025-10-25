@@ -29,9 +29,8 @@ interface GraphNode {
   name: string;
   photo_count: number;
   total_faces: number;
-  community: number;
-  x: number; // <-- Now provided by the API
-  y: number; // <-- Now provided by the API
+  x: number; // <-- Computed using MDS based on similarity
+  y: number; // <-- Computed using MDS based on similarity
   representative_face?: string; // <-- Representative face image path
   representative_bbox?: number[]; // <-- Representative face bounding box [x1, y1, x2, y2]
 }
@@ -39,6 +38,7 @@ interface GraphNode {
 interface GraphLink {
   source: string | GraphNode;
   target: string | GraphNode;
+  similarity: number; // <-- Similarity score 0-1
   weight: number;
 }
 
@@ -48,8 +48,9 @@ interface GraphData {
   stats: {
     total_people: number;
     total_connections: number;
-    total_photos: number;
-    total_communities: number;
+    min_similarity: number;
+    max_similarity: number;
+    avg_similarity: number;
   };
 }
 
@@ -59,13 +60,9 @@ interface PersonFace {
 }
 
 const PYTHON_API_URL = process.env.NEXT_PUBLIC_PYTHON_API_URL || 'http://localhost:5000';
-const COMMUNITY_COLORS = [
-  '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
-  '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
-];
 // --- (End of mock types) ---
 
-export default function SocialGraphPage() {
+export default function SimilarityGraphPage() {
   const [graphData, setGraphData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -73,7 +70,7 @@ export default function SocialGraphPage() {
   const [personFaces, setPersonFaces] = useState<PersonFace[]>([]);
   const [loadingPhotos, setLoadingPhotos] = useState(false);
   const [showPhotoDialog, setShowPhotoDialog] = useState(false);
-  const [linkThreshold, setLinkThreshold] = useState(3);
+  const [similarityThreshold, setSimilarityThreshold] = useState(0.5);
   const [isFullscreen, setIsFullscreen] = useState(false);
   // const [simulationProgress, setSimulationProgress] = useState(0); // <-- REMOVED
 
@@ -87,14 +84,10 @@ export default function SocialGraphPage() {
 
   // ===== TOUS LES USEMEMO/USECALLBACK EN HAUT, AVANT LES EARLY RETURNS =====
 
-  const getCommunityColor = useCallback((community: number) => {
-    return COMMUNITY_COLORS[community % COMMUNITY_COLORS.length];
-  }, []);
-
   const filteredLinks = useMemo(() => {
     if (!graphData) return [];
-    return graphData.links.filter(link => link.weight >= linkThreshold);
-  }, [graphData, linkThreshold]);
+    return graphData.links.filter(link => link.similarity >= similarityThreshold);
+  }, [graphData, similarityThreshold]);
 
   const getUniquePhotos = useMemo(() => {
     const photoMap = new Map<string, PersonFace[]>();
@@ -117,14 +110,6 @@ export default function SocialGraphPage() {
     if (!selectedNodeId || !graphData) return null;
     return graphData.nodes.find(n => n.id === selectedNodeId) || null;
   }, [selectedNodeId, graphData]);
-
-  const communitySizes = useMemo(() => {
-    if (!graphData) return {};
-    return graphData.nodes.reduce((acc, node) => {
-      acc[node.community] = (acc[node.community] || 0) + 1;
-      return acc;
-    }, {} as Record<number, number>);
-  }, [graphData]);
 
   const maxLinkWeight = useMemo(() => {
     if (!graphData || graphData.links.length === 0) return 1;
@@ -157,19 +142,6 @@ export default function SocialGraphPage() {
         .call(zoomRef.current.transform, d3.zoomIdentity);
     }
   }, []);
-
-  const handleThresholdChange = useMemo(
-    () => {
-      let timeoutId: NodeJS.Timeout;
-      return (values: number[]) => {
-        clearTimeout(timeoutId);
-        timeoutId = setTimeout(() => {
-          setLinkThreshold(values[0]);
-        }, 150);
-      };
-    },
-    []
-  );
 
   const toggleFullscreen = useCallback(() => {
     // Toggle fake fullscreen (CSS-based) instead of real fullscreen
@@ -209,9 +181,9 @@ export default function SocialGraphPage() {
   // ===== MAINTENANT LES USEEFFECT =====
 
   useEffect(() => {
-    fetch(`${PYTHON_API_URL}/api/people/graph`)
+    fetch(`${PYTHON_API_URL}/api/people/similarity-graph?min_similarity=${similarityThreshold}`)
       .then(res => {
-        if (!res.ok) throw new Error('Failed to fetch graph data');
+        if (!res.ok) throw new Error('Failed to fetch similarity graph data');
         return res.json();
       })
       .then(data => {
@@ -219,11 +191,11 @@ export default function SocialGraphPage() {
         setLoading(false);
       })
       .catch(error => {
-        console.error('Error loading graph:', error);
+        console.error('Error loading similarity graph:', error);
         setError(error.message);
         setLoading(false);
       });
-  }, []);
+  }, [similarityThreshold]);
 
   // This effect updates selection highlights and remains unchanged
   useEffect(() => {
@@ -236,7 +208,7 @@ export default function SocialGraphPage() {
       .duration(300)
       .attr('fill', (n: any) => n.id === selectedNodeId 
         ? 'url(#selected-gradient)' 
-        : `url(#gradient-${n.community})`)
+        : 'url(#default-gradient)')
       .attr('r', (n: any) => Math.sqrt(n.photo_count) * 0.5 + (n.id === selectedNodeId ? 7 : 4));
     
     nodes.select('.glow')
@@ -244,12 +216,11 @@ export default function SocialGraphPage() {
       .duration(300)
       .attr('fill', (n: any) => {
         if (n.id === selectedNodeId) return 'hsla(221.2, 83.2%, 53.3%, 0.25)';
-        const color = getCommunityColor(n.community);
-        return d3.color(color)!.copy({opacity: 0.12}).toString();
+        return 'hsla(200, 70%, 50%, 0.12)';
       })
       .attr('r', (n: any) => Math.sqrt(n.photo_count) * 0.5 + (n.id === selectedNodeId ? 12 : 6));
 
-  }, [selectedNodeId, getCommunityColor]);
+  }, [selectedNodeId]);
 
   // ===== SIMPLIFIED MAIN D3 EFFECT =====
   useEffect(() => {
@@ -268,13 +239,11 @@ export default function SocialGraphPage() {
     const defs = svg.append('defs');
     
     // --- Definitions (Gradients, Filters) ---
-    // This code remains the same
-    Array.from(new Set(graphData.nodes.map(n => n.community))).forEach(communityId => {
-      const color = getCommunityColor(communityId);
-      const gradient = defs.append('radialGradient').attr('id', `gradient-${communityId}`);
-      gradient.append('stop').attr('offset', '0%').attr('stop-color', d3.color(color)!.brighter(0.8).toString());
-      gradient.append('stop').attr('offset', '100%').attr('stop-color', color);
-    });
+    // Default gradient for all nodes
+    const defaultGradient = defs.append('radialGradient').attr('id', 'default-gradient');
+    defaultGradient.append('stop').attr('offset', '0%').attr('stop-color', 'hsl(200, 70%, 60%)');
+    defaultGradient.append('stop').attr('offset', '100%').attr('stop-color', 'hsl(200, 70%, 50%)');
+    
     const selectedGradient = defs.append('radialGradient').attr('id', 'selected-gradient');
     selectedGradient.append('stop').attr('offset', '0%').attr('stop-color', 'hsl(221.2, 83.2%, 73.3%)');
     selectedGradient.append('stop').attr('offset', '100%').attr('stop-color', 'hsl(221.2, 83.2%, 53.3%)');
@@ -317,75 +286,25 @@ export default function SocialGraphPage() {
     // simulation.on('end', ...)
     // =============================================
 
-    // --- Hulls ---
-    // This logic was in the tick handler, now it runs once
-    const communities = d3.group(nodes, d => d.community);
-    const hullGroup = container.append('g').attr('class', 'hulls');
-
-    hullGroup.selectAll('path')
-      .data(Array.from(communities.entries()))
-      .join('path')
-      .attr('fill', ([communityId]) => {
-        const color = getCommunityColor(communityId as number);
-        return d3.color(color)!.copy({opacity: 0.05}).toString();
-      })
-      .attr('stroke', ([communityId]) => getCommunityColor(communityId as number))
-      .attr('stroke-width', 2)
-      .attr('stroke-dasharray', '8,4')
-      .attr('stroke-opacity', 0.3)
-      .attr('d', ([communityId, communityNodes]) => {
-        if (communityNodes.length < 3) return null;
-        // This works because n.x and n.y are already defined
-        const points = communityNodes.map(n => [n.x!, n.y!] as [number, number]);
-        const hull = d3.polygonHull(points);
-        if (!hull || hull.length < 3) return null;
-        const centroid = d3.polygonCentroid(hull);
-        const expansion = 70;
-        const expanded = hull.map(point => {
-          const dx = point[0] - centroid[0];
-          const dy = point[1] - centroid[1];
-          const distance = Math.sqrt(dx * dx + dy * dy);
-          if (distance === 0) return point;
-          return [
-            point[0] + (dx / distance) * expansion,
-            point[1] + (dy / distance) * expansion
-          ];
-        });
-        return `M${expanded.map(p => p.join(',')).join('L')}Z`;
-      });
+    // --- No Hulls in Similarity Graph ---
+    // Similarity graph doesn't have community hulls
 
     // --- Links ---
     const linkGroup = container.append('g').attr('class', 'links');
     linksGroupRef.current = linkGroup;
 
-    const intraCommunityLinks = hydratedLinks.filter(l => l.source.community === l.target.community);
-    const interCommunityLinks = hydratedLinks.filter(l => l.source.community !== l.target.community);
-
-    linkGroup.selectAll('line.inter')
-      .data(interCommunityLinks)
+    // All links are drawn the same way - no community-based coloring
+    linkGroup.selectAll('line')
+      .data(hydratedLinks)
       .join('line')
-      .attr('class', 'inter')
       .attr('stroke', 'hsl(215.4, 16.3%, 46.9%)')
-      .attr('stroke-opacity', d => 0.08 + (d.weight / maxWeight) * 0.12)
-      .attr('stroke-width', d => 0.5 + Math.sqrt(d.weight) * 0.4)
+      .attr('stroke-opacity', d => 0.1 + (d.weight / maxWeight) * 0.2)
+      .attr('stroke-width', d => 0.8 + Math.sqrt(d.weight) * 0.5)
       .attr('stroke-linecap', 'round')
-      .attr('x1', (d: any) => d.source.x) // <-- Set position directly
-      .attr('y1', (d: any) => d.source.y) // <-- Set position directly
-      .attr('x2', (d: any) => d.target.x) // <-- Set position directly
-      .attr('y2', (d: any) => d.target.y); // <-- Set position directly
-
-    linkGroup.selectAll('line.intra')
-      .data(intraCommunityLinks)
-      .join('line')
-      .attr('class', 'intra')
-      .attr('stroke', (d: any) => getCommunityColor(d.source.community)) // <-- Set color directly
-      .attr('stroke-opacity', d => 0.15 + (d.weight / maxWeight) * 0.25)
-      .attr('stroke-width', d => 0.8 + Math.sqrt(d.weight) * 0.6)
-      .attr('stroke-linecap', 'round')
-      .attr('x1', (d: any) => d.source.x) // <-- Set position directly
-      .attr('y1', (d: any) => d.source.y) // <-- Set position directly
-      .attr('x2', (d: any) => d.target.x) // <-- Set position directly
-      .attr('y2', (d: any) => d.target.y); // <-- Set position directly
+      .attr('x1', (d: any) => d.source.x)
+      .attr('y1', (d: any) => d.source.y)
+      .attr('x2', (d: any) => d.target.x)
+      .attr('y2', (d: any) => d.target.y);
 
     // --- Nodes ---
     
@@ -408,14 +327,13 @@ export default function SocialGraphPage() {
 
     nodesRef.current = node;
 
-    // All node drawing code (circles, text, rect) remains the same
+    // All node drawing code
     node.append('circle')
       .attr('r', d => Math.sqrt(d.photo_count) * 0.5 + 6)
       .attr('fill', d => {
-        const color = getCommunityColor(d.community);
         return d.id === selectedNodeId 
           ? 'hsla(221.2, 83.2%, 53.3%, 0.2)' 
-          : d3.color(color)!.copy({opacity: 0.12}).toString();
+          : 'hsla(200, 70%, 50%, 0.12)';
       })
       .attr('class', 'glow');
 
@@ -423,7 +341,7 @@ export default function SocialGraphPage() {
       .attr('r', d => Math.sqrt(d.photo_count) * 0.5 + 4)
       .attr('fill', d => d.id === selectedNodeId 
         ? 'url(#selected-gradient)' 
-        : `url(#gradient-${d.community})`)
+        : 'url(#default-gradient)')
       .attr('stroke', 'hsl(0, 0%, 100%)')
       .attr('stroke-width', 1.5)
       .attr('filter', 'url(#drop-shadow)')
@@ -496,7 +414,7 @@ export default function SocialGraphPage() {
       .style('user-select', 'none');
 
     node.append('title')
-      .text(d => `${d.name}\nGroupe ${d.community + 1}\n${d.photo_count} photos\n${d.total_faces} visages`);
+      .text(d => `${d.name}\n${d.photo_count} photos\n${d.total_faces} visages`);
 
 
     // --- Event Handlers ---
@@ -572,7 +490,7 @@ export default function SocialGraphPage() {
     // No simulation, so no cleanup function is needed
     // return () => { ... };
 
-  }, [graphData, filteredLinks, isFullscreen, getCommunityColor]);
+  }, [graphData, filteredLinks, isFullscreen]);
   // ^ selectedNodeId removed from dependencies to prevent graph re-render on node click
   // ^ fetchPersonPhotos removed and replaced with ref to prevent graph re-render
   // Node selection styling is handled by separate useEffect above
@@ -647,61 +565,40 @@ export default function SocialGraphPage() {
                 <div className="text-sm text-muted-foreground">Connexions visibles</div>
               </Card>
               <Card className="p-4 bg-card">
-                <div className="text-2xl font-bold text-primary">{graphData.stats.total_photos}</div>
-                <div className="text-sm text-muted-foreground">Photos</div>
+                <div className="text-2xl font-bold text-primary">{(graphData.stats.avg_similarity * 100).toFixed(0)}%</div>
+                <div className="text-sm text-muted-foreground">Similarité moyenne</div>
               </Card>
               <Card className="p-4 bg-card">
-                <div className="text-2xl font-bold text-primary">{graphData.stats.total_communities}</div>
-                <div className="text-sm text-muted-foreground">Communautés</div>
+                <div className="text-2xl font-bold text-primary">{(graphData.stats.min_similarity * 100).toFixed(0)}-{(graphData.stats.max_similarity * 100).toFixed(0)}%</div>
+                <div className="text-sm text-muted-foreground">Plage de similarité</div>
               </Card>
             </div>
 
-            {/* ... (Slider card remains the same) ... */}
+            {/* Similarity threshold slider */}
             <Card className="p-4 mt-4 bg-card">
               <div className="flex items-center gap-4">
                 <Filter className="h-5 w-5 text-muted-foreground" />
                 <div className="flex-1">
                   <div className="flex justify-between mb-2">
                     <label className="text-sm font-medium">
-                      Filtrer les connexions faibles
+                      Seuil de similarité minimum
                     </label>
                     <span className="text-sm text-muted-foreground">
-                      Min: {linkThreshold} photo{linkThreshold > 1 ? 's' : ''} partagée{linkThreshold > 1 ? 's' : ''}
+                      Min: {(similarityThreshold * 100).toFixed(0)}%
                     </span>
                   </div>
                   <Slider
-                    defaultValue={[linkThreshold]}
-                    onValueChange={handleThresholdChange}
-                    min={1}
-                    max={Math.max(10, Math.floor(maxLinkWeight / 2))}
-                    step={1}
+                    defaultValue={[similarityThreshold * 100]}
+                    onValueChange={(values) => setSimilarityThreshold(values[0] / 100)}
+                    min={0}
+                    max={100}
+                    step={5}
                     className="w-full"
                   />
                   <div className="text-xs text-muted-foreground mt-2">
-                    Augmentez pour réduire le bruit visuel ({graphData.stats.total_connections} connexions au total)
+                    Augmentez pour ne montrer que les personnes très similaires ({graphData.stats.total_connections} connexions au total)
                   </div>
                 </div>
-              </div>
-            </Card>
-
-            {/* ... (Community legend card remains the same) ... */}
-            <Card className="p-4 mt-4 bg-card">
-              <h3 className="font-semibold mb-3">Communautés détectées</h3>
-              <div className="flex gap-3 flex-wrap">
-                {Object.entries(communitySizes).map(([communityId, size]) => (
-                  <div key={communityId} className="flex items-center gap-2 bg-secondary px-3 py-2 rounded-lg">
-                    <div 
-                      className="w-4 h-4 rounded-full"
-                      style={{ backgroundColor: getCommunityColor(parseInt(communityId)) }}
-                    />
-                    <span className="text-sm font-medium">
-                      Groupe {parseInt(communityId) + 1}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      ({size})
-                    </span>
-                  </div>
-                ))}
               </div>
             </Card>
           </div>
@@ -740,16 +637,15 @@ export default function SocialGraphPage() {
         
         {!isFullscreen && (
           <div className="mt-4 text-sm text-muted-foreground">
-            {/* ... (Legend remains the same) ... */}
             <p className="font-medium mb-2">Légende:</p>
             <div className="grid grid-cols-2 gap-2">
               <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: getCommunityColor(0) }}></div>
-                <span>Connexion dans la communauté</span>
+                <div className="w-3 h-3 rounded-full bg-primary"></div>
+                <span>Personnes similaires</span>
               </div>
               <div className="flex items-center gap-2">
-                <div className="w-3 h-3 rounded-full bg-muted-foreground"></div>
-                <span>Connexion entre communautés</span>
+                <div className="w-3 h-3 rounded-full bg-blue-400"></div>
+                <span>Connexion de similarité</span>
               </div>
             </div>
           </div>
@@ -762,15 +658,11 @@ export default function SocialGraphPage() {
       <Dialog open={showPhotoDialog} onOpenChange={setShowPhotoDialog}>
         <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle className="text-2xl flex items-center gap-2">
+            <DialogTitle className="text-2xl">
               {selectedNode?.name}
-              <div 
-                className="w-4 h-4 rounded-full"
-                style={{ backgroundColor: selectedNode ? getCommunityColor(selectedNode.community) : '' }}
-              />
             </DialogTitle>
             <DialogDescription>
-              Groupe {selectedNode ? selectedNode.community + 1 : ''} • {getUniquePhotos.length} photo{getUniquePhotos.length > 1 ? 's' : ''} • {personFaces.length} visage{personFaces.length > 1 ? 's' : ''}
+              {getUniquePhotos.length} photo{getUniquePhotos.length > 1 ? 's' : ''} • {personFaces.length} visage{personFaces.length > 1 ? 's' : ''}
             </DialogDescription>
           </DialogHeader>
           
