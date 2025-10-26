@@ -10,6 +10,7 @@ import numpy as np
 import json
 import graph_utils
 import similarity_graph_utils
+import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -31,8 +32,8 @@ def load_clip_resources():
     print("🔄 Loading CLIP model and index...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
-    clip_index = faiss.read_index("embeddings.faiss")
-    clip_filenames = np.load("filenames.npy")
+    clip_index = faiss.read_index("./context/embeddings.faiss")
+    clip_filenames = np.load("./context/filenames.npy", allow_pickle=True)
     print(f"✅ CLIP resources loaded on {device}")
 
 def load_face_resources():
@@ -611,6 +612,44 @@ def get_similar_clusters():
             'message': 'Failed to find similar clusters'
         }), 500
 
+def run_indexing_background():
+    """Run indexing in a background thread"""
+    try:
+        print("🔄 Starting background indexing...")
+        import index_faces
+        import image_index
+
+        image_index.build_index()
+        index_faces.build_face_index()
+        index_faces.cluster_faces()
+
+        print("✅ Background indexing completed")
+
+        # Reload resources after indexing
+        load_clip_resources()
+        load_face_resources()
+
+    except Exception as e:
+        print(f"❌ Background indexing failed: {e}")
+        traceback.print_exc()
+
+@app.route('/api/index/trigger', methods=['POST'])
+def trigger_indexing():
+    """Trigger indexing in background thread"""
+    try:
+        # Start indexing in background thread
+        thread = threading.Thread(target=run_indexing_background, daemon=True)
+        thread.start()
+
+        return jsonify({
+            'status': 'started',
+            'message': 'Indexing started in background'
+        }), 202  # 202 Accepted
+
+    except Exception as e:
+        print(f"❌ Error triggering indexing: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     # Load resources into memory at startup

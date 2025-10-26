@@ -1,3 +1,4 @@
+# python
 import os
 import torch
 import clip
@@ -6,35 +7,83 @@ import faiss
 import numpy as np
 from tqdm import tqdm
 
-def build_index(image_folder="images", model_name="ViT-B/32", device="cuda" if torch.cuda.is_available() else "cpu"):
+def build_index(image_folder="images", model_name="ViT-L/14", device=None):
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    abs_folder = image_folder
+    if not os.path.isdir(abs_folder):
+        raise FileNotFoundError(f"Image folder not found: {abs_folder}")
+
+    # gather image files as absolute paths
+    image_files = sorted([
+        os.path.join(abs_folder, f)
+        for f in os.listdir(abs_folder)
+        if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.jpg'))
+    ])
+    if not image_files:
+        print(f"No images found in {abs_folder}.")
+        return
+
+    # decide whether we have an existing index+filenames to extend
+    index_path = "context/embeddings.faiss"
+    names_path = "context/filenames.npy"
+    has_index_and_names = os.path.exists(index_path) and os.path.exists(names_path)
+
+    existing_names = []
+    if has_index_and_names:
+        try:
+            existing_names = list(np.load(names_path, allow_pickle=True))
+        except Exception:
+            print(f"Warning: failed to load `{names_path}` — rebuilding from scratch.")
+            has_index_and_names = False
+            existing_names = []
+
+    # compute which images are new
+    existing_set = set(existing_names)
+    new_images = [p for p in image_files if p not in existing_set]
+    if not new_images:
+        print("No new images to index.")
+        return
+
+    # load model
     model, preprocess = clip.load(model_name, device=device)
+    model.eval()
 
-    image_files = [os.path.join(image_folder, f) for f in os.listdir(image_folder)
-                   if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.JPG'))]
-
-    embeddings = []
-    filenames = []
-
-    for img_path in tqdm(image_files, desc="Embedding images"):
+    # encode new images
+    new_embeddings = []
+    for img_path in tqdm(new_images, desc="Embedding new images"):
         image = preprocess(Image.open(img_path)).unsqueeze(0).to(device)
         with torch.no_grad():
-            image_features = model.encode_image(image)
-        image_features /= image_features.norm(dim=-1, keepdim=True)
-        embeddings.append(image_features.cpu().numpy())
-        filenames.append(img_path)
+            feats = model.encode_image(image)
+        feats = feats / feats.norm(dim=-1, keepdim=True)
+        new_embeddings.append(feats.cpu().numpy())
+    new_embeddings = np.concatenate(new_embeddings, axis=0).astype('float32')
 
-    embeddings = np.concatenate(embeddings, axis=0)
+    # if we have a usable existing index, load and append
+    if has_index_and_names:
+        index = faiss.read_index(index_path)
+        # sanity: check dims
+        try:
+            dim = index.d
+        except Exception:
+            dim = new_embeddings.shape[1]
+        if dim != new_embeddings.shape[1]:
+            raise RuntimeError(f"Dimension mismatch: existing index dim {dim} vs new embeddings {new_embeddings.shape[1]}")
+        index.add(new_embeddings)
+    else:
+        # create a fresh index
+        dim = new_embeddings.shape[1]
+        index = faiss.IndexFlatIP(dim)
+        index.add(new_embeddings)
+        # if there were some existing names file but no index, we intentionally overwrite
 
-    # Save to FAISS
-    dim = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dim)
-    index.add(embeddings)
-    faiss.write_index(index, "embeddings.faiss")
+    # persist index and updated filenames
+    faiss.write_index(index, index_path)
+    updated_names = existing_names + new_images
+    np.save(names_path, np.array(updated_names, dtype=object))
 
-    np.save("filenames.npy", np.array(filenames))
-    print(f"✅ Indexed {len(filenames)} images.")
-
+    print(f"✅ Added {len(new_images)} new embeddings. Total indexed: {index.ntotal}")
 
 if __name__ == "__main__":
     build_index()

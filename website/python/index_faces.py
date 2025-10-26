@@ -10,19 +10,42 @@ import json
 def build_face_index(image_folder="images", output_folder="faces"):
     os.makedirs(output_folder, exist_ok=True)
 
-    print("🚀 Initializing InsightFace...")
+    embeddings_path = os.path.join(output_folder, "embeddings.npy")
+    filenames_path = os.path.join(output_folder, "filenames.npy")
+    bboxes_path = os.path.join(output_folder, "bboxes.npy")
+    processed_path = os.path.join(output_folder, "processed_images.json")
+
+    # Load existing data if available
+    if os.path.exists(embeddings_path) and os.path.exists(filenames_path) and os.path.exists(bboxes_path):
+        print("📂 Loading existing embeddings...")
+        embeddings = np.load(embeddings_path).tolist()
+        filenames = np.load(filenames_path, allow_pickle=True).tolist()
+        bboxes = np.load(bboxes_path, allow_pickle=True).tolist()
+        with open(processed_path, 'r') as f:
+            processed_images = set(json.load(f))
+        print(f"✅ Loaded {len(filenames)} existing face embeddings from {len(processed_images)} images")
+    else:
+        embeddings = []
+        filenames = []
+        bboxes = []
+        processed_images = set()
+
+    # Get all image files
+    all_images = {f for f in os.listdir(image_folder)
+                  if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))}
+    new_images = all_images - processed_images
+
+    if not new_images:
+        print("✅ No new images to process")
+        return
+
+    print(f"🚀 Initializing InsightFace...")
     app = FaceAnalysis(name="buffalo_l", providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
     app.prepare(ctx_id=0)
 
-    embeddings = []
-    filenames = []
-    bboxes = []
-
-    print(f"📸 Indexing images in '{image_folder}' ...")
-    for fname in tqdm(os.listdir(image_folder)):
+    print(f"📸 Processing {len(new_images)} new images...")
+    for fname in tqdm(new_images):
         path = os.path.join(image_folder, fname)
-        if not fname.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".JPG")):
-            continue
 
         img = cv2.imread(path)
         if img is None:
@@ -35,15 +58,20 @@ def build_face_index(image_folder="images", output_folder="faces"):
             filenames.append(path)
             bboxes.append(face.bbox.tolist())
 
+        processed_images.add(fname)
+
+    # Save updated data
     embeddings = np.stack(embeddings)
-    np.save(os.path.join(output_folder, "embeddings.npy"), embeddings)
-    np.save(os.path.join(output_folder, "filenames.npy"), np.array(filenames))
-    np.save(os.path.join(output_folder, "bboxes.npy"), np.array(bboxes))
+    np.save(embeddings_path, embeddings)
+    np.save(filenames_path, np.array(filenames))
+    np.save(bboxes_path, np.array(bboxes))
 
-    print(f"✅ Indexed {len(filenames)} faces from {len(os.listdir(image_folder))} images.")
+    with open(processed_path, 'w') as f:
+        json.dump(list(processed_images), f)
 
+    print(f"✅ Total: {len(filenames)} faces from {len(processed_images)} images ({len(new_images)} new)")
 
-def cluster_faces(embeddings_path="faces/embeddings.npy", 
+def cluster_faces(embeddings_path="faces/embeddings.npy",
                   filenames_path="faces/filenames.npy",
                   bboxes_path="faces/bboxes.npy",
                   output_folder="faces",
