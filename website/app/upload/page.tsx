@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import {Header} from '@/components/header';
+import { UploadProgress } from './UploadProgress';
 
 export default function UploadPage() {
   const { data: session, status } = useSession();
@@ -13,6 +14,7 @@ export default function UploadPage() {
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [indexingTaskId, setIndexingTaskId] = useState<string | null>(null);
 
   if (status === 'loading') {
     return <div className="flex items-center justify-center min-h-screen">Loading...</div>;
@@ -66,6 +68,15 @@ export default function UploadPage() {
       const fileInput = document.getElementById('file-input') as HTMLInputElement;
       if (fileInput) fileInput.value = '';
 
+      const index_response = await fetch('http://localhost:5000/api/index/trigger', {
+        method: 'POST'
+      });
+
+      if (index_response.ok) {
+        const data = await index_response.json();
+        setIndexingTaskId(data.task_id);
+      }
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed');
     } finally {
@@ -74,7 +85,8 @@ export default function UploadPage() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col">
+      <div>
+      <div className="min-h-screen flex flex-col">
       <Header />
       <div className="container mx-auto px-4 py-8">
         <h1 className="text-3xl font-bold mb-8">Upload Images</h1>
@@ -147,5 +159,14 @@ export default function UploadPage() {
         </div>
       </div>
     </div>
+      <UploadProgress
+        taskId={indexingTaskId}
+        onComplete={() => {
+          console.log('Indexing complete!');
+          setIndexingTaskId(null);
+        }}
+      />
+    </div>
+
   );
 }
