@@ -10,6 +10,7 @@ import numpy as np
 import json
 import graph_utils
 import similarity_graph_utils
+import context_graph_utils
 
 app = Flask(__name__)
 CORS(app)
@@ -227,7 +228,126 @@ def check_person_name_match(query):
     
     return None, query
 
-def combine_search_results(face_results, text_results, threshold=0.01):
+def rescore_with_clip(face_results, context_query, top_k=50):
+    """Re-score face search results using CLIP for context matching"""
+    if not context_query or not face_results:
+        return face_results
+    
+    print(f"🔄 Re-scoring {len(face_results)} face results with CLIP context: '{context_query}'")
+    
+    # Extract filenames from face results
+    filenames_to_check = []
+    filepath_to_face_result = {}
+    for result in face_results:
+        filepath = result['filepath']
+        filename = filepath.split('/')[-1]
+        # Look up in clip_filenames to get the index
+        for idx, clip_fname in enumerate(clip_filenames):
+            clip_fname_clean = clip_fname[7:] if clip_fname.startswith('images/') else clip_fname
+            if clip_fname_clean == filename:
+                filenames_to_check.append((idx, filepath))
+                filepath_to_face_result[filepath] = result
+                break
+    
+    if not filenames_to_check:
+        return face_results
+    
+    # Get CLIP scores for these specific images
+    with torch.no_grad():
+        text = clip.tokenize([context_query]).to(device)
+        text_features = clip_model.encode_text(text)
+        text_features /= text_features.norm(dim=-1, keepdim=True)
+    
+    text_vec = text_features.cpu().numpy().astype(np.float32)
+    
+    # Calculate similarity for each image
+    rescored_results = []
+    for clip_idx, filepath in filenames_to_check:
+        image_embedding = np.array([clip_index.reconstruct(int(clip_idx))], dtype=np.float32)
+        # Normalize
+        image_embedding = image_embedding / np.linalg.norm(image_embedding)
+        
+        # Calculate cosine similarity
+        clip_score = float(np.dot(text_vec, image_embedding.T)[0][0])
+        
+        face_result = filepath_to_face_result[filepath]
+        rescored_results.append({
+            **face_result,
+            'clip_score': clip_score,
+            'face_score_original': float(face_result['score'])
+        })
+    
+    return rescored_results
+
+
+def rescore_with_face(text_results, person_name, top_k=50):
+    """Re-score CLIP results using face recognition for person matching"""
+    if not person_name or not text_results:
+        return text_results
+    
+    print(f"🔄 Re-scoring {len(text_results)} CLIP results with face recognition for: '{person_name}'")
+    
+    # Find the person's cluster
+    matched_cluster = None
+    for cluster_id, cluster_data in people_clusters['clusters'].items():
+        if cluster_data.get('name', '').lower() == person_name.lower():
+            matched_cluster = cluster_data
+            break
+    
+    if not matched_cluster:
+        return text_results
+    
+    # Get cluster embeddings and compute medoid
+    faces = matched_cluster.get('faces', [])
+    if not faces:
+        return text_results
+    
+    cluster_embeddings = []
+    for face in faces:
+        face_idx = face.get('embedding_idx')
+        if face_idx is not None and face_idx < len(face_index):
+            cluster_embeddings.append(face_index[face_idx])
+    
+    if not cluster_embeddings:
+        return text_results
+    
+    centroid_embedding = np.mean(cluster_embeddings, axis=0)
+    distances_to_center = [np.linalg.norm(emb - centroid_embedding) for emb in cluster_embeddings]
+    medoid_idx = np.argmin(distances_to_center)
+    reference_embedding = cluster_embeddings[medoid_idx]
+    
+    # Re-score each text result with face similarity
+    rescored_results = []
+    for result in text_results:
+        filepath = result['filepath']
+        filename = filepath.split('/')[-1]
+        
+        # Find face embeddings for this image
+        face_scores_for_image = []
+        for face_idx, face_fname in enumerate(face_filenames):
+            face_fname_clean = face_fname[7:] if face_fname.startswith('images/') else str(face_fname)
+            if face_fname_clean == filename:
+                distance = np.linalg.norm(face_index[face_idx] - reference_embedding)
+                face_scores_for_image.append(float(-distance))
+        
+        # Use best face match for this image
+        if face_scores_for_image:
+            best_face_score = float(max(face_scores_for_image))
+        else:
+            best_face_score = -999.0  # Very low score if no face found
+        
+        rescored_results.append({
+            **result,
+            'face_score': best_face_score,
+            'clip_score_original': float(result['score']),
+            'matched_person': person_name,
+            'face_match': True if face_scores_for_image else False
+        })
+    
+    return rescored_results
+
+
+def combine_search_results(face_results, text_results, threshold_faces=0.0, threshold_text=0.1):
     """Combine face and text search results using multiplicative scoring with threshold
     
     Face scores are negative distances. Convert to similarity by inverting:
@@ -240,49 +360,81 @@ def combine_search_results(face_results, text_results, threshold=0.01):
     # Add face results with threshold
     for result in face_results:
         filepath = result['filepath']
-        face_score = result['score']  # Negative distance
-        # Convert negative distance to similarity in range (0, 1]: use inverse distance
-        # This maps distance 0 -> 1.0, distance 10 -> ~0.091, distance 20 -> ~0.047
-        # We use 1 / (1 + distance) which is stable for a wide range of distances.
+        face_score = float(result.get('face_score_original', result['score']))  # Use original if available
+        clip_score = float(result.get('clip_score', 0))  # Get CLIP score if rescored
+        
+        # Convert negative distance to similarity in range (0, 1]
         face_similarity = 1.0 / (1.0 + abs(face_score))
-        # Add threshold, use threshold for missing text score
-        combined_score = (face_similarity + threshold) * threshold
-        combined[filepath] = {
-            'result': result,
-            'face_score': face_score,
-            'face_similarity': face_similarity,
-            'text_score': 0,  # No text match yet
-            'combined_score': combined_score
-        }
-        # Print with higher precision so very small similarities are visible
-        print(f"📊 Face only: {filepath.split('/')[-1]} | Face dist: {face_score:.3f} → sim: {face_similarity:.6f} | ({face_similarity:.6f} + {threshold:.6f}) × {threshold:.6f} = {combined_score:.6f}")
+        
+        # If we have a CLIP score from rescoring, use it
+        if clip_score > 0:
+            combined_score = float((face_similarity + threshold_faces) * (clip_score + threshold_text))
+            combined[filepath] = {
+                'result': result,
+                'face_score': face_score,
+                'face_similarity': face_similarity,
+                'text_score': clip_score,
+                'combined_score': combined_score
+            }
+            print(f"📊 Face→CLIP: {filepath.split('/')[-1]} | Face: {face_similarity:.3f}, CLIP: {clip_score:.3f} = {combined_score:.3f} ⭐⭐")
+        else:
+            combined_score = float((face_similarity + threshold_faces) * threshold_text)
+            combined[filepath] = {
+                'result': result,
+                'face_score': face_score,
+                'face_similarity': face_similarity,
+                'text_score': 0.0,
+                'combined_score': combined_score
+            }
+            print(f"📊 Face only: {filepath.split('/')[-1]} | Face: {face_similarity:.6f} = {combined_score:.6f}")
     
     # Add or update with text results
     for result in text_results:
         filepath = result['filepath']
-        text_score = result['score']
+        text_score = float(result.get('clip_score_original', result['score']))  # Use original if available
+        face_score = float(result.get('face_score', 0))  # Get face score if rescored
         
         if filepath in combined:
-            # File found in both searches - multiply with thresholds added!
-            face_similarity = combined[filepath]['face_similarity']
-            combined_score = (face_similarity + threshold) * (text_score + threshold)
-            combined[filepath]['text_score'] = text_score
-            combined[filepath]['combined_score'] = combined_score
-            # Preserve face match metadata
-            combined[filepath]['result']['score'] = combined_score
-            print(f"📊 BOTH: {filepath.split('/')[-1]} | ({face_similarity:.3f} + {threshold:.3f}) × ({text_score:.3f} + {threshold:.3f}) = {combined_score:.3f} ⭐")
+            # File found in both original searches
+            # Use the rescored values if available
+            existing = combined[filepath]
+            if face_score != 0:  # Text was rescored with face
+                face_similarity = 1.0 / (1.0 + abs(face_score))
+                combined_score = float((face_similarity + threshold_faces) * (text_score + threshold_text))
+                combined[filepath]['face_score'] = face_score
+                combined[filepath]['face_similarity'] = face_similarity
+                combined[filepath]['text_score'] = text_score
+                combined[filepath]['combined_score'] = combined_score
+                combined[filepath]['result']['score'] = combined_score
+                print(f"📊 CLIP→Face: {filepath.split('/')[-1]} | Face: {face_similarity:.3f}, CLIP: {text_score:.3f} = {combined_score:.3f} ⭐⭐")
+            else:
+                # Already combined in face results section
+                pass
         else:
-            # File only in text search - use threshold for missing face match
-            combined_score = threshold * (text_score + threshold)
-            combined[filepath] = {
-                'result': result,
-                'face_score': 0,
-                'face_similarity': 0,
-                'text_score': text_score,
-                'combined_score': combined_score
-            }
-            combined[filepath]['result']['score'] = combined_score
-            print(f"📊 Text only: {filepath.split('/')[-1]} | {threshold:.3f} × ({text_score:.3f} + {threshold:.3f}) = {combined_score:.3f}")
+            # File only in text search
+            if face_score != 0:  # Was rescored with face
+                face_similarity = 1.0 / (1.0 + abs(face_score))
+                combined_score = float((face_similarity + threshold_faces) * (text_score + threshold_text))
+                combined[filepath] = {
+                    'result': result,
+                    'face_score': face_score,
+                    'face_similarity': face_similarity,
+                    'text_score': text_score,
+                    'combined_score': combined_score
+                }
+                combined[filepath]['result']['score'] = combined_score
+                print(f"📊 CLIP→Face: {filepath.split('/')[-1]} | Face: {face_similarity:.3f}, CLIP: {text_score:.3f} = {combined_score:.3f} ⭐")
+            else:
+                combined_score = float(threshold_faces * (text_score + threshold_text))
+                combined[filepath] = {
+                    'result': result,
+                    'face_score': 0.0,
+                    'face_similarity': 0.0,
+                    'text_score': text_score,
+                    'combined_score': combined_score
+                }
+                combined[filepath]['result']['score'] = combined_score
+                print(f"📊 Text only: {filepath.split('/')[-1]} | CLIP: {text_score:.3f} = {combined_score:.3f}")
     
     # Sort by combined score and return results
     sorted_results = sorted(combined.values(), key=lambda x: x['combined_score'], reverse=True)
@@ -313,19 +465,31 @@ def search():
             matched_person, search_context = check_person_name_match(query)
         
         if matched_person and search_type == 'text':
-            # Person name detected - combine face and text search
+            # Person name detected - combine face and text search with bidirectional rescoring
             print(f"🔍 Found person name match: '{matched_person}'")
             
             # Get face-based results
-            face_results = search_person_by_name(matched_person, top_k=50)
+            face_results = search_person_by_name(matched_person, top_k=100)
             
             if search_context:
-                # If there's additional context, also do text search
-                print(f"🔍 Additional context: '{search_context}' - combining with semantic search")
-                text_results = search_images_fast(search_context, top_k=50)
+                # BIDIRECTIONAL RESCORING:
+                # 1. Re-score face results with CLIP context
+                # 2. Do text search and re-score with face recognition
+                # 3. Combine all results
                 
-                # Combine both results with weighted scoring
-                results = combine_search_results(face_results, text_results)
+                print(f"🔍 Additional context: '{search_context}' - using bidirectional rescoring")
+                
+                # Get CLIP text search results
+                text_results = search_images_fast(search_context, top_k=100)
+                
+                # Re-score face results with CLIP context
+                face_results_rescored = rescore_with_clip(face_results, search_context, top_k=100)
+                
+                # Re-score text results with face recognition
+                text_results_rescored = rescore_with_face(text_results, matched_person, top_k=100)
+                
+                # Combine both rescored results
+                results = combine_search_results(face_results_rescored, text_results_rescored)
             else:
                 # No additional context, just use face results
                 results = face_results
@@ -377,7 +541,7 @@ def search():
                 'type': file_type,
                 'thumbnail': thumbnail,
                 'date': file_date,
-                'score': score
+                'score': float(score)
             }
             
             # Add matched person info if available
@@ -609,6 +773,64 @@ def get_similar_clusters():
         return jsonify({
             'error': str(e),
             'message': 'Failed to find similar clusters'
+        }), 500
+
+
+@app.route('/api/images/context-graph', methods=['GET'])
+def get_context_graph():
+    """
+    Get context clustering graph data showing images clustered by semantic content
+    Uses CLIP embeddings to cluster images by context and displays context labels
+    
+    Query params:
+        person_filter: (Deprecated) Single person name/ID to filter images by
+        people_filter: Comma-separated list of person IDs - show only images with ALL these people
+        min_similarity: Minimum similarity to create links (0-1, default: 0.6)
+        num_clusters: Number of context clusters to create (default: 10)
+        
+    Returns JSON with:
+    - nodes: Array of image clusters with context labels and positions
+    - links: Array of connections between similar context clusters
+    - stats: Overall graph statistics
+    """
+    try:
+        person_filter = request.args.get('person_filter')  # Single person (deprecated)
+        people_filter_str = request.args.get('people_filter')  # Multiple people (comma-separated)
+        min_similarity = float(request.args.get('min_similarity', 0.6))
+        num_clusters = int(request.args.get('num_clusters', 10))
+        
+        # Parse people_filter from comma-separated string to list
+        people_filter = None
+        if people_filter_str:
+            people_filter = [p.strip() for p in people_filter_str.split(',') if p.strip()]
+        
+        embeddings_path = 'embeddings.faiss'
+        filenames_path = 'filenames.npy'
+        clusters_path = 'faces/clusters.json'
+        
+        print(f"📊 Generating context graph (people_filter={people_filter}, min_similarity={min_similarity}, num_clusters={num_clusters})...")
+        
+        # Pass the global CLIP model to avoid reloading
+        graph_data = context_graph_utils.generate_context_graph(
+            embeddings_path=embeddings_path,
+            filenames_path=filenames_path,
+            clusters_path=clusters_path,
+            n_clusters=num_clusters,
+            min_similarity=min_similarity,
+            person_filter=person_filter,  # Backward compatibility
+            people_filter=people_filter,  # New multi-person filter
+            clip_model=clip_model,  # Use global pre-loaded model
+            device=device  # Use global device
+        )
+        
+        return jsonify(graph_data), 200
+        
+    except Exception as e:
+        print(f"❌ Error generating context graph: {str(e)}")
+        traceback.print_exc()
+        return jsonify({
+            'error': str(e),
+            'message': 'Failed to generate context graph'
         }), 500
 
 

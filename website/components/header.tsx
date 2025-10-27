@@ -1,7 +1,7 @@
 "use client"
 
 import { signOut, useSession } from "next-auth/react"
-import { Moon, Sun, LogOut, User, Users, Search, Tag, Upload, Network, GitBranch } from "lucide-react"
+import { Moon, Sun, LogOut, User, Users, Search, Tag, Upload, Network, GitBranch, Grid3x3 } from "lucide-react"
 import { useTheme } from "next-themes"
 import { Button } from "@/components/ui/button"
 import Link from "next/link"
@@ -50,6 +50,12 @@ export function Header() {
               <Button variant="ghost" size="sm">
                 <GitBranch className="h-4 w-4 mr-2" />
                 Similarity
+              </Button>
+            </Link>
+            <Link href="/context-graph">
+              <Button variant="ghost" size="sm">
+                <Grid3x3 className="h-4 w-4 mr-2" />
+                Context
               </Button>
             </Link>
             <Link href="/label">
