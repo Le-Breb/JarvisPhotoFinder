@@ -11,6 +11,7 @@ import json
 import graph_utils
 import similarity_graph_utils
 import context_graph_utils
+import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -32,8 +33,8 @@ def load_clip_resources():
     print("🔄 Loading CLIP model and index...")
     device = "cuda" if torch.cuda.is_available() else "cpu"
     clip_model, clip_preprocess = clip.load("ViT-L/14", device=device)
-    clip_index = faiss.read_index("embeddings.faiss")
-    clip_filenames = np.load("filenames.npy")
+    clip_index = faiss.read_index("./context/embeddings.faiss")
+    clip_filenames = np.load("./context/filenames.npy", allow_pickle=True)
     print(f"✅ CLIP resources loaded on {device}")
 
 def load_face_resources():
@@ -604,7 +605,6 @@ def get_social_graph():
             'message': 'Failed to generate social graph'
         }), 500
 
-
 @app.route('/api/people/graph/connections/<person_id>', methods=['GET'])
 def get_person_graph_connections(person_id):
     """
@@ -626,7 +626,6 @@ def get_person_graph_connections(person_id):
         print(f"❌ Error getting person connections: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
-
 @app.route('/api/people/graph/top-connections', methods=['GET'])
 def get_top_connections():
     """
@@ -646,7 +645,6 @@ def get_top_connections():
     except Exception as e:
         print(f"❌ Error getting top connections: {str(e)}")
         return jsonify({'error': str(e)}), 500
-
 
 @app.route('/api/people/similarity-graph', methods=['GET'])
 def get_similarity_graph():
@@ -775,6 +773,130 @@ def get_similar_clusters():
             'message': 'Failed to find similar clusters'
         }), 500
 
+from flask import Flask, request, jsonify, Response
+import queue
+
+# Add this near the top with other global variables
+indexing_progress_queues = {}
+
+def run_indexing_background(task_id):
+    """Run indexing in a background thread with progress tracking"""
+    try:
+        print(f"🔄 Starting background indexing for task {task_id}...")
+
+        # Send initial progress
+        send_progress(task_id, 0, "Starting indexing...")
+
+        import index_faces
+        import image_index
+
+        # Image indexing (40% of total progress)
+        send_progress(task_id, 10, "Indexing images...")
+        image_index.build_index()
+        send_progress(task_id, 40, "Images indexed")
+
+        # Face indexing (40% of total progress)
+        send_progress(task_id, 50, "Detecting faces...")
+        index_faces.build_face_index()
+        send_progress(task_id, 80, "Faces indexed")
+
+        # Face clustering (20% of total progress)
+        send_progress(task_id, 85, "Clustering faces...")
+        index_faces.cluster_faces()
+        send_progress(task_id, 100, "Indexing complete")
+
+        print(f"✅ Background indexing completed for task {task_id}")
+
+        # Reload resources after indexing
+        load_clip_resources()
+        load_face_resources()
+
+    except Exception as e:
+        print(f"❌ Background indexing failed: {e}")
+        traceback.print_exc()
+        send_progress(task_id, -1, f"Error: {str(e)}")
+    finally:
+        # Clean up queue after 5 seconds
+        import time
+        time.sleep(5)
+        if task_id in indexing_progress_queues:
+            del indexing_progress_queues[task_id]
+
+def send_progress(task_id, percent, message):
+    """Send progress update to all listeners for this task"""
+    if task_id in indexing_progress_queues:
+        try:
+            indexing_progress_queues[task_id].put({
+                'progress': percent,
+                'message': message
+            })
+        except:
+            pass
+
+@app.route('/api/index/trigger', methods=['POST'])
+def trigger_indexing():
+    """Trigger indexing in background thread and return task ID"""
+    try:
+        import uuid
+        task_id = str(uuid.uuid4())
+
+        # Create progress queue for this task
+        indexing_progress_queues[task_id] = queue.Queue()
+
+        # Start indexing in background thread
+        thread = threading.Thread(
+            target=run_indexing_background,
+            args=(task_id,),
+            daemon=True
+        )
+        thread.start()
+
+        return jsonify({
+            'status': 'started',
+            'message': 'Indexing started in background',
+            'task_id': task_id
+        }), 202
+
+    except Exception as e:
+        print(f"❌ Error triggering indexing: {str(e)}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/index/progress/<task_id>')
+def indexing_progress(task_id):
+    """SSE endpoint for indexing progress"""
+
+    def generate():
+        if task_id not in indexing_progress_queues:
+            yield f"data: {json.dumps({'progress': -1, 'message': 'Task not found'})}\n\n"
+            return
+
+        progress_queue = indexing_progress_queues[task_id]
+
+        while True:
+            try:
+                # Wait for progress update with timeout
+                progress_data = progress_queue.get(timeout=30)
+                yield f"data: {json.dumps(progress_data)}\n\n"
+
+                # If complete or error, end stream
+                if progress_data['progress'] >= 100 or progress_data['progress'] < 0:
+                    break
+
+            except queue.Empty:
+                # Send keepalive
+                yield f": keepalive\n\n"
+            except:
+                break
+
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'X-Accel-Buffering': 'no'
+        }
+    )
 
 @app.route('/api/images/context-graph', methods=['GET'])
 def get_context_graph():
@@ -838,6 +960,6 @@ if __name__ == '__main__':
     # Load resources into memory at startup
     load_clip_resources()
     load_face_resources()
-    
+
     print("🚀 Starting Flask server...")
     app.run(host='0.0.0.0', port=5000, debug=True)
