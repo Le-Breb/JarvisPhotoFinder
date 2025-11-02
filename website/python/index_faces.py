@@ -61,7 +61,10 @@ def build_face_index(image_folder="images", output_folder="faces"):
         processed_images.add(fname)
 
     # Save updated data
-    embeddings = np.stack(embeddings)
+    if len(embeddings) == 1:
+        embeddings = np.array([embeddings[0]])  # Wrap single embedding
+    else:
+        embeddings = np.stack(embeddings)
     np.save(embeddings_path, embeddings)
     np.save(filenames_path, np.array(filenames))
     np.save(bboxes_path, np.array(bboxes))

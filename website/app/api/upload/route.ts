@@ -72,29 +72,6 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Trigger indexing via Flask API if files were uploaded
-    if (uploadedFiles.length > 0) {
-      try {
-        console.log('🔄 Triggering indexing for:', uploadedFiles);
-
-        // Call Flask API to trigger background indexing
-        const response = await fetch('http://localhost:5000/api/index/trigger', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        });
-
-        if (response.ok) {
-          console.log('✅ Indexing triggered successfully');
-        } else {
-          console.error('❌ Failed to trigger indexing:', response.statusText);
-        }
-      } catch (e) {
-        console.error('❌ Error calling indexing API:', e);
-      }
-    }
-
     return NextResponse.json({
       uploaded: uploadedFiles.length,
       files: uploadedFiles,
