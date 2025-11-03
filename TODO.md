@@ -3,7 +3,7 @@
 # Backlog
 - [ ] 🔴 : 🎨 Clean the python code and the back-end code of the project. 
 - [ ] 🔴 : 📝 Define the scope of the product, what we want to do with it (either global search engine, music, ect ..., focus on photo/video, may be detection of events in photo, video). 
-- [ ] 🟡 : 🔧 Change the path system to be centralized + allow nested folders inside image folder.
+- [x] 🟡 : 🔧 Change the path system to be centralized + allow nested folders inside image folder.
 - [ ] 🟡 : 🔒️ Secure the account system, see how it works and make it the most secure possible.
 - [ ] 🟡 : ✨ Add distant loading of the website.
 - [ ] 🟡 : 🎨 Make a clear distinction between the client and the server, both should be able to start with one line command. 
