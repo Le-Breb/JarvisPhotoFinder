@@ -6,8 +6,10 @@ from insightface.app import FaceAnalysis
 from sklearn.cluster import DBSCAN
 import pickle
 import json
+import config
+import utils
 
-def build_face_index(image_folder="images", output_folder="faces"):
+def build_face_index(output_folder="faces"):
     os.makedirs(output_folder, exist_ok=True)
 
     embeddings_path = os.path.join(output_folder, "embeddings.npy")
@@ -31,9 +33,8 @@ def build_face_index(image_folder="images", output_folder="faces"):
         processed_images = set()
 
     # Get all image files
-    all_images = {f for f in os.listdir(image_folder)
-                  if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))}
-    new_images = all_images - processed_images
+    all_images = utils.get_images(True)
+    new_images = [image for image in all_images if image not in processed_images]
 
     if not new_images:
         print("✅ No new images to process")
@@ -44,10 +45,9 @@ def build_face_index(image_folder="images", output_folder="faces"):
     app.prepare(ctx_id=0)
 
     print(f"📸 Processing {len(new_images)} new images...")
-    for fname in tqdm(new_images):
-        path = os.path.join(image_folder, fname)
-
-        img = cv2.imread(path)
+    for path in tqdm(new_images):
+        abs_path = os.path.join(config.IMAGES_FOLDER, path)
+        img = cv2.imread(abs_path)
         if img is None:
             continue
 
@@ -58,7 +58,7 @@ def build_face_index(image_folder="images", output_folder="faces"):
             filenames.append(path)
             bboxes.append(face.bbox.tolist())
 
-        processed_images.add(fname)
+        processed_images.add(path)
 
     # Save updated data
     if len(embeddings) == 1:

@@ -6,23 +6,20 @@ from PIL import Image
 import faiss
 import numpy as np
 from tqdm import tqdm
+import config
+import utils
 
-def build_index(image_folder="images", model_name="ViT-L/14", device=None):
+def build_index(model_name="ViT-L/14", device=None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    abs_folder = image_folder
-    if not os.path.isdir(abs_folder):
-        raise FileNotFoundError(f"Image folder not found: {abs_folder}")
+    if not os.path.isdir(config.IMAGES_FOLDER):
+        raise FileNotFoundError(f"Image folder not found: {config.IMAGES_FOLDER}")
 
-    # gather image files as absolute paths
-    image_files = sorted([
-        os.path.join(abs_folder, f)
-        for f in os.listdir(abs_folder)
-        if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.jpg'))
-    ])
+    # gather image files as relative paths
+    image_files = utils.get_images(True)
     if not image_files:
-        print(f"No images found in {abs_folder}.")
+        print(f"No images found in {config.IMAGES_FOLDER}.")
         return
 
     # decide whether we have an existing index+filenames to extend
@@ -53,7 +50,8 @@ def build_index(image_folder="images", model_name="ViT-L/14", device=None):
     # encode new images
     new_embeddings = []
     for img_path in tqdm(new_images, desc="Embedding new images"):
-        image = preprocess(Image.open(img_path)).unsqueeze(0).to(device)
+        abs_path = os.path.join(config.IMAGES_FOLDER, img_path)
+        image = preprocess(Image.open(abs_path)).unsqueeze(0).to(device)
         with torch.no_grad():
             feats = model.encode_image(image)
         feats = feats / feats.norm(dim=-1, keepdim=True)
