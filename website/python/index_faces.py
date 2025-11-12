@@ -8,8 +8,9 @@ import pickle
 import json
 import config
 import utils
+from indexing import send_progress
 
-def build_face_index(output_folder="faces"):
+def build_face_index(output_folder="faces", start_percentage=None, end_percentage=None, progress_queue=None, task_id=None):
     os.makedirs(output_folder, exist_ok=True)
 
     embeddings_path = os.path.join(output_folder, "embeddings.npy")
@@ -45,7 +46,8 @@ def build_face_index(output_folder="faces"):
     app.prepare(ctx_id=0)
 
     print(f"📸 Processing {len(new_images)} new images...")
-    for path in tqdm(new_images):
+    max_digit_len = len(str(len(new_images)))
+    for current_index, path in enumerate(tqdm(new_images)):
         abs_path = os.path.join(config.IMAGES_FOLDER, path)
         img = cv2.imread(abs_path)
         if img is None:
@@ -57,6 +59,11 @@ def build_face_index(output_folder="faces"):
             embeddings.append(emb)
             filenames.append(path)
             bboxes.append(face.bbox.tolist())
+
+        if start_percentage is not None and end_percentage is not None:
+            percent = start_percentage + (current_index / len(new_images)) * (end_percentage - start_percentage)
+            message = f"Processing images: {current_index + 1}/{len(new_images)}"
+            send_progress(task_id, percent, message, progress_queue)
 
         processed_images.add(path)
 

@@ -1,5 +1,6 @@
 from flask import Flask
 from flask_cors import CORS
+from indexing import send_progress
 import os
 from datetime import datetime
 import traceback
@@ -789,16 +790,15 @@ def run_indexing_background(task_id, progress_queue):
         import image_index
 
         send_progress(task_id, 10, "Indexing images...", progress_queue)
-        image_index.build_index()
-        send_progress(task_id, 40, "Images indexed", progress_queue)
+        image_index.build_index(start_percentage=10, end_percentage=50, progress_queue=progress_queue, task_id=task_id)
+        send_progress(task_id, 50, "Images indexed", progress_queue)
 
         import index_faces
 
         send_progress(task_id, 50, "Detecting faces...", progress_queue)
-        index_faces.build_face_index()
-        send_progress(task_id, 80, "Faces indexed", progress_queue)
+        index_faces.build_face_index(start_percentage=50, end_percentage=90, progress_queue=progress_queue, task_id=task_id)
 
-        send_progress(task_id, 85, "Clustering faces...", progress_queue)
+        send_progress(task_id, 90, "Clustering faces...", progress_queue)
         index_faces.cluster_faces()
         send_progress(task_id, 100, "Indexing complete", progress_queue)
 
@@ -808,16 +808,6 @@ def run_indexing_background(task_id, progress_queue):
         print(f"❌ Background indexing failed: {e}")
         traceback.print_exc()
         send_progress(task_id, -1, f"Error: {str(e)}", progress_queue)
-
-def send_progress(task_id, percent, message, progress_queue):
-    """Send progress update via the provided queue"""
-    try:
-        progress_queue.put({
-            'progress': percent,
-            'message': message
-        })
-    except Exception as e:
-        print(f"Failed to send progress: {e}")
 
 import uuid
 import threading

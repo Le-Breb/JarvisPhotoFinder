@@ -1,6 +1,10 @@
-import index_faces, image_index
-
-if __name__ == "__main__":
-    image_index.build_index()
-    index_faces.build_face_index()
-    index_faces.cluster_faces()
+def send_progress(task_id, percent, message, progress_queue):
+    """Send progress update via the provided queue"""
+    try:
+        progress_queue.put({
+            'task_id': task_id,
+            'progress':  round(percent),
+            'message': message
+        })
+    except Exception as e:
+        print(f"Failed to send progress: {e}")

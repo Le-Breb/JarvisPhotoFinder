@@ -8,8 +8,9 @@ import numpy as np
 from tqdm import tqdm
 import config
 import utils
+from indexing import send_progress
 
-def build_index(model_name="ViT-L/14", device=None):
+def build_index(model_name="ViT-L/14", device=None, start_percentage=None, end_percentage=None, progress_queue=None, task_id=None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
@@ -49,13 +50,19 @@ def build_index(model_name="ViT-L/14", device=None):
 
     # encode new images
     new_embeddings = []
-    for img_path in tqdm(new_images, desc="Embedding new images"):
+    max_digit_len = len(str(len(new_images)))
+    for current_index, img_path in enumerate(tqdm(new_images, desc="Embedding new images")):
         abs_path = os.path.join(config.IMAGES_FOLDER, img_path)
         image = preprocess(Image.open(abs_path)).unsqueeze(0).to(device)
         with torch.no_grad():
             feats = model.encode_image(image)
         feats = feats / feats.norm(dim=-1, keepdim=True)
         new_embeddings.append(feats.cpu().numpy())
+        if start_percentage is not None and end_percentage is not None:
+            total_new = len(new_images)
+            percent = start_percentage + (end_percentage - start_percentage) * (current_index + 1) / total_new
+            status_txt = f"Embedding images: {current_index + 1:{max_digit_len}d}/{total_new}"
+            send_progress(task_id, percent, status_txt, progress_queue)
     new_embeddings = np.concatenate(new_embeddings, axis=0).astype('float32')
 
     # if we have a usable existing index, load and append
