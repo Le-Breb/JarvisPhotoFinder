@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, app, request, jsonify, current_app
 import face_recognition
 import os
 from datetime import datetime
@@ -6,9 +6,18 @@ import traceback
 import torch
 import clip
 import numpy as np
-from jarvis.main import clip_model, clip_preprocess, clip_index, clip_filenames, device, people_clusters, face_index, face_filenames
 
 search_bp = Blueprint('search', __name__)
+
+def get_people_clusters():
+    return current_app.config['PEOPLE_CLUSTERS']
+
+def get_face_index():
+    return current_app.config['FACE_INDEX']
+
+def get_face_filenames():
+    return current_app.config['FACE_FILENAMES']
+
 
 def search_images_fast(query, clip_model, clip_preprocess, clip_index, clip_filenames, device, top_k=5):
     """Fast search using pre-loaded resources"""
@@ -66,6 +75,7 @@ def search_person_fast(reference_image_path, face_index, face_filenames, top_k=5
 
 def search_person_by_name(person_name, top_k=50):
     """Search for images by person name from clusters"""
+    people_clusters = get_people_clusters()
     if not people_clusters or not people_clusters.get('clusters'):
         return []
 
@@ -89,8 +99,8 @@ def search_person_by_name(person_name, top_k=50):
     cluster_embedding_indices = []
     for face in faces:
         face_idx = face.get('embedding_idx')
-        if face_idx is not None and face_idx < len(face_index):
-            cluster_embeddings.append(face_index[face_idx])
+        if face_idx is not None and face_idx < len(get_face_index()):
+            cluster_embeddings.append(get_face_index()[face_idx])
             cluster_embedding_indices.append(face_idx)
 
     if not cluster_embeddings:
@@ -104,7 +114,7 @@ def search_person_by_name(person_name, top_k=50):
     reference_embedding = cluster_embeddings[medoid_local_idx]
 
     # Find similar faces using the medoid as reference
-    distances = np.linalg.norm(face_index - reference_embedding, axis=1)
+    distances = np.linalg.norm(get_face_index() - reference_embedding, axis=1)
 
     # Only deprioritize the medoid itself (set to max of other values)
     max_other_distance = np.max([distances[i] for i in range(len(distances))
@@ -118,13 +128,13 @@ def search_person_by_name(person_name, top_k=50):
     seen_files = set()
 
     for rank, idx in enumerate(top_indices):
-        if idx >= len(face_filenames):
+        if idx >= len(get_face_filenames()):
             continue
 
         if len(results) >= top_k:
             break
 
-        filename = str(face_filenames[idx])
+        filename = str(get_face_filenames()[idx])
 
         # Avoid duplicates
         if filename in seen_files:
@@ -154,6 +164,7 @@ def check_person_names_match(query):
         matched_persons: List of matched person names
         search_context: Remaining query text after removing person names
     """
+    people_clusters = get_people_clusters()
     if not people_clusters or not people_clusters.get('clusters'):
         return [], query
 
@@ -204,6 +215,7 @@ def search_multiple_persons_by_name(person_names, top_k=50):
     for person_name in person_names:
         # Find the person's cluster
         matched_cluster = None
+        people_clusters = get_people_clusters()
         for cluster_id, cluster_data in people_clusters['clusters'].items():
             if cluster_data.get('name', '').lower() == person_name.lower():
                 matched_cluster = cluster_data
@@ -224,6 +236,8 @@ def search_multiple_persons_by_name(person_names, top_k=50):
 
         for face in faces:
             face_idx = face.get('embedding_idx')
+            face_index = get_face_index()
+            face_filenames = get_face_filenames()
             if face_idx is not None and face_idx < len(face_filenames):
                 filename = str(face_filenames[face_idx])
                 person_images.add(filename)
@@ -520,10 +534,16 @@ def search():
 
         elif search_type == 'face':
             # Direct face search with reference image
-            results = search_person_fast(query, top_k=50)
+            results = search_person_fast(query, get_face_index(), get_face_filenames(), top_k=50)
         else:
             # Standard CLIP text search
-            results = search_images_fast(query, top_k=50)
+            clip_model = current_app.config['CLIP_MODEL']
+            clip_preprocess = current_app.config['CLIP_PREPROCESS']
+            clip_index = current_app.config['CLIP_INDEX']
+            clip_filenames = current_app.config['CLIP_FILENAMES']
+
+            results = search_images_fast(query, clip_model=clip_model, clip_preprocess=clip_preprocess,
+                                         clip_index=clip_index, clip_filenames=clip_filenames, device='cpu', top_k=50)
 
         # Convert results to frontend format
         formatted_results = []
