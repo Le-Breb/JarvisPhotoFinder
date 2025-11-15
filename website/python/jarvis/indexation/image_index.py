@@ -6,9 +6,10 @@ from PIL import Image
 import faiss
 import numpy as np
 from tqdm import tqdm
-import config
-import utils
-from indexing import send_progress
+import jarvis.config as config
+import jarvis.utils as utils
+from jarvis.indexation.indexing import send_progress
+from jarvis.config import CONTEXT_PATH
 
 def build_index(model_name="ViT-L/14", device=None, start_percentage=None, end_percentage=None, progress_queue=None, task_id=None):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
@@ -24,8 +25,8 @@ def build_index(model_name="ViT-L/14", device=None, start_percentage=None, end_p
         return
 
     # decide whether we have an existing index+filenames to extend
-    index_path = "context/embeddings.faiss"
-    names_path = "context/filenames.npy"
+    index_path = os.path.join(CONTEXT_PATH, "embeddings.faiss")
+    names_path = os.path.join(CONTEXT_PATH, "filenames.npy")
     has_index_and_names = os.path.exists(index_path) and os.path.exists(names_path)
 
     existing_names = []
@@ -90,5 +91,4 @@ def build_index(model_name="ViT-L/14", device=None, start_percentage=None, end_p
 
     print(f"✅ Added {len(new_images)} new embeddings. Total indexed: {index.ntotal}")
 
-if __name__ == "__main__":
-    build_index()
+

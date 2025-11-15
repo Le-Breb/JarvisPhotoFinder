@@ -1,4 +1,4 @@
-import config
+import jarvis.config as config
 import glob
 import os
 
