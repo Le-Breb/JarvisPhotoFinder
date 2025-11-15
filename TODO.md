@@ -9,6 +9,7 @@
 - [ ] 🟡 : 🎨 Make a clear distinction between the client and the server, both should be able to start with one line command. 
 - [ ] 🟡 : ✨ The client should be available everywhere, Mobile, Computer.
 - [ ] 🟡 : 👱 Add support for searching for multiple people at the same time.
+- [ ] 🟡 : 👱 Apply renaming without having to restart the app.
 - [ ] 🟡 : 📁 Add a file browser (+move upload there ?)
 - [ ] 🟢 : ✨ Create a way to separate event and make a way to go through images by event, the clustering should be with all the data possible (date, CLIP, faces, tags, camera info)
 - [ ] 🟢 : ✨ Improve the labeling system, having at the end the most efficient way to label. (Change both of the model should be considered).
