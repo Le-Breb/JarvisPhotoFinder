@@ -8,3 +8,5 @@ HANDLED_IMG_EXTENSIONS=(".jpg", ".jpeg", ".png", ".webp", ".bmp")
 CLIP_MODEL_NAME="ViT-L/14"
 CONTEXT_PATH="data/context/"
 FACE_PATH="data/faces/"
+DEFAULT_SEARCH_COUNT_CONTEXT=50
+DEFAULT_SEARCH_COUNT_FACES=50
