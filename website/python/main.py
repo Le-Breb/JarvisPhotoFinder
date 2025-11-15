@@ -209,27 +209,145 @@ def search_person_by_name(person_name, top_k=50):
 
     return results
 
-def check_person_name_match(query):
-    """Check if query matches a person name in clusters"""
+def check_person_names_match(query):
+    """Check if query matches one or more person names in clusters
+
+    Returns:
+        matched_persons: List of matched person names
+        search_context: Remaining query text after removing person names
+    """
     if not people_clusters or not people_clusters.get('clusters'):
-        return None, query
+        return [], query
 
     query_lower = query.lower().strip()
+    matched_persons = []
+    remaining_query = query_lower
 
+    # Sort person names by length (longest first) to match longer names first
+    person_names = []
     for cluster_id, cluster_data in people_clusters['clusters'].items():
         person_name = cluster_data.get('name', '').strip()
+        if person_name:
+            person_names.append(person_name)
+
+    person_names.sort(key=len, reverse=True)
+
+    # Find all matching person names
+    for person_name in person_names:
         person_name_lower = person_name.lower()
 
-        # Check for exact match or if query contains person name
-        if person_name_lower == query_lower:
-            return person_name, ""  # Exact match, no additional context
-        elif person_name_lower in query_lower:
-            # Person name found in query - keep full query as context
-            return person_name, query
-        elif query_lower in person_name_lower:
-            return person_name, query  # Query is part of name, use full query
+        if person_name_lower in remaining_query:
+            matched_persons.append(person_name)
+            # Remove matched name from query
+            remaining_query = remaining_query.replace(person_name_lower, '').strip()
 
-    return None, query
+    # Clean up remaining query (remove extra spaces)
+    search_context = ' '.join(remaining_query.split())
+
+    return matched_persons, search_context
+
+def search_multiple_persons_by_name(person_names, top_k=50):
+    """Search for images containing ALL specified persons
+
+    Args:
+        person_names: List of person names to search for
+        top_k: Number of results to return
+
+    Returns:
+        List of images containing all specified persons
+    """
+    if not person_names:
+        return []
+
+    # Get images for each person
+    person_image_sets = []
+    person_embeddings = []
+
+    for person_name in person_names:
+        # Find the person's cluster
+        matched_cluster = None
+        for cluster_id, cluster_data in people_clusters['clusters'].items():
+            if cluster_data.get('name', '').lower() == person_name.lower():
+                matched_cluster = cluster_data
+                break
+
+        if not matched_cluster:
+            print(f"⚠️ Person not found: {person_name}")
+            return []  # If any person not found, return empty
+
+        # Get all faces for this person
+        faces = matched_cluster.get('faces', [])
+        if not faces:
+            return []
+
+        # Collect images containing this person
+        person_images = set()
+        cluster_embeddings = []
+
+        for face in faces:
+            face_idx = face.get('embedding_idx')
+            if face_idx is not None and face_idx < len(face_filenames):
+                filename = str(face_filenames[face_idx])
+                person_images.add(filename)
+                cluster_embeddings.append(face_index[face_idx])
+
+        person_image_sets.append(person_images)
+
+        # Calculate medoid for this person
+        if cluster_embeddings:
+            centroid = np.mean(cluster_embeddings, axis=0)
+            distances = [np.linalg.norm(emb - centroid) for emb in cluster_embeddings]
+            medoid_idx = np.argmin(distances)
+            person_embeddings.append(cluster_embeddings[medoid_idx])
+
+    # Find intersection - images containing ALL persons
+    common_images = set.intersection(*person_image_sets)
+
+    if not common_images:
+        print(f"⚠️ No images found containing all persons: {', '.join(person_names)}")
+        return []
+
+    print(f"✅ Found {len(common_images)} images containing all {len(person_names)} persons")
+
+    # Score images based on average face match quality for all persons
+    results = []
+
+    for filename in common_images:
+        # Calculate average match score across all persons
+        total_score = 0.0
+
+        for person_embedding in person_embeddings:
+            # Find best face match in this image for this person
+            best_distance = float('inf')
+
+            for face_idx, face_fname in enumerate(face_filenames):
+                face_fname_clean = face_fname[7:] if face_fname.startswith('images/') else str(face_fname)
+                if face_fname_clean == filename or str(face_fname) == filename:
+                    distance = np.linalg.norm(face_index[face_idx] - person_embedding)
+                    best_distance = min(best_distance, distance)
+
+            if best_distance != float('inf'):
+                total_score += -best_distance
+
+        # Average score across all persons
+        avg_score = total_score / len(person_embeddings)
+
+        # Format filename
+        display_filename = filename[7:] if filename.startswith('images/') else filename
+        image_path = f'/api/images/{display_filename}'
+
+        results.append({
+            'filepath': image_path,
+            'thumbnail': image_path,
+            'score': float(avg_score),
+            'matched_persons': person_names,
+            'face_match': True
+        })
+
+    # Sort by score
+    results.sort(key=lambda x: x['score'], reverse=True)
+
+    return results[:top_k]
 
 def rescore_with_clip(face_results, context_query, top_k=50):
     """Re-score face search results using CLIP for context matching"""
@@ -460,41 +578,37 @@ def search():
             return jsonify({'results': []})
 
         results = []
-        matched_person = None
+        matched_persons = []
         search_context = None
 
-        # Check if query matches a person name and extract context
+        # Check if query matches person names and extract context
         if search_type == 'text':
-            matched_person, search_context = check_person_name_match(query)
+            matched_persons, search_context = check_person_names_match(query)
 
-        if matched_person and search_type == 'text':
-            # Person name detected - combine face and text search with bidirectional rescoring
-            print(f"🔍 Found person name match: '{matched_person}'")
-            
-            # Get face-based results
-            face_results = search_person_by_name(matched_person, top_k=100)
-            
-            if search_context:
-                # BIDIRECTIONAL RESCORING:
-                # 1. Re-score face results with CLIP context
-                # 2. Do text search and re-score with face recognition
-                # 3. Combine all results
+        if matched_persons and search_type == 'text':
+            # Person names detected
+            print(f"🔍 Found {len(matched_persons)} person name(s): {', '.join(matched_persons)}")
 
-                print(f"🔍 Additional context: '{search_context}' - using bidirectional rescoring")
+            # Get face-based results for all matched persons
+            face_results = search_multiple_persons_by_name(matched_persons, top_k=100)
+
+            if search_context and face_results:
+                # Re-score face results with CLIP context
+                print(f"🔍 Additional context: '{search_context}' - rescoring with CLIP")
 
                 # Get CLIP text search results
                 text_results = search_images_fast(search_context, top_k=100)
 
-                # Re-score face results with CLIP context
+                # Re-score face results with CLIP
                 face_results_rescored = rescore_with_clip(face_results, search_context, top_k=100)
 
-                # Re-score text results with face recognition
-                text_results_rescored = rescore_with_face(text_results, matched_person, top_k=100)
+                # Re-score text results with face recognition (using first person as reference)
+                text_results_rescored = rescore_with_face(text_results, matched_persons[0], top_k=100)
 
-                # Combine both rescored results
+                # Combine results
                 results = combine_search_results(face_results_rescored, text_results_rescored)
             else:
-                # No additional context, just use face results
+                # No additional context or no face results
                 results = face_results
 
         elif search_type == 'face':
@@ -504,13 +618,14 @@ def search():
             # Standard CLIP text search
             results = search_images_fast(query, top_k=50)
 
-        # Convert results to the format expected by the frontend
+        # Convert results to frontend format
         formatted_results = []
         for idx, result in enumerate(results):
             filepath = result['filepath']
             score = result['score']
             thumbnail = result['thumbnail']
             matched_person_name = result.get('matched_person', None)
+            matched_persons_list = result.get('matched_persons', None)
             face_match = result.get('face_match', False)
 
             filename = filepath.split('/')[-1]
@@ -547,17 +662,19 @@ def search():
                 'score': float(score)
             }
 
-            # Add matched person info if available
-            if matched_person_name:
+            # Add matched person info
+            if matched_persons_list:
+                result_item['matched_persons'] = matched_persons_list
+            elif matched_person_name:
                 result_item['matched_person'] = matched_person_name
 
             formatted_results.append(result_item)
 
         # Add metadata about the search
         response_data = {'results': formatted_results}
-        if matched_person:
-            response_data['search_type'] = 'combined_face_text' if search_context else 'face_by_name'
-            response_data['matched_person'] = matched_person
+        if matched_persons:
+            response_data['search_type'] = 'combined_face_text' if search_context else 'multi_person_face'
+            response_data['matched_persons'] = matched_persons
             if search_context:
                 response_data['search_context'] = search_context
 
